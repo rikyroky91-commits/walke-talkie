@@ -35,6 +35,7 @@ ACCESS_CODE = os.environ.get("ACCESS_CODE", "")
 MAX_SPEAKERS = 4            # voci contemporanee per canale (= lettori audio nel client)
 MAX_TX_SECONDS = 120        # durata massima di una trasmissione
 SILENT_TX_TIMEOUT = 4.0     # chiude la trasmissione se chi parla non invia audio
+SILENT_CALL_TIMEOUT = 30.0  # in chiamata si tollerano pause lunghe (telefono in background, rete lenta)
 MAX_CLIENT_BACKLOG = 48 * 1024  # ~15 s di audio in coda: l'ascoltatore lento salta la trasmissione
 MAX_NAME = 32
 
@@ -236,7 +237,8 @@ async def tx_watchdog(app: web.Application):
         now = time.monotonic()
         for channel in list(channels.values()):
             for speaker, tx in list(channel.speakers.items()):
-                if now - tx.last_audio > SILENT_TX_TIMEOUT:
+                silent_limit = SILENT_CALL_TIMEOUT if tx.call else SILENT_TX_TIMEOUT
+                if now - tx.last_audio > silent_limit:
                     await end_tx(channel, speaker, "timeout")
                 elif not tx.call and now - tx.started > MAX_TX_SECONDS:
                     await send_json(speaker, {"t": "tx_limit"})

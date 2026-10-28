@@ -278,17 +278,37 @@ function openMic() {
       return null;
     }
     state.stream = s;
+    watchTrack(s);
+    logEvent('mic aperto' + (document.hidden ? ' (in background)' : ''));
     attachAnalyser();
     ensureCall();
     render();
     return s;
   }).catch((e) => {
+    logEvent('mic non disponibile: ' + e.name);
     toast('Microfono non disponibile: ' + e.message);
     return null;
   }).finally(() => {
     state.micOpening = null;
   });
   return state.micOpening;
+}
+
+// Android può mettere in muto o chiudere la traccia (altra app che prende il mic,
+// telefonata, risparmio energetico): se la chiude, la riapriamo e la chiamata riparte.
+function watchTrack(stream) {
+  const track = stream.getAudioTracks()[0];
+  if (!track) return;
+  track.addEventListener('mute', () => logEvent('mic messo in muto dal sistema'));
+  track.addEventListener('unmute', () => logEvent('mic riattivato dal sistema'));
+  track.addEventListener('ended', () => {
+    if (state.stream !== stream) return;
+    logEvent('mic chiuso dal sistema: riapro');
+    state.stream = null;
+    detachAnalyser();
+    stopTx();
+    if (state.joined && (!document.hidden || keepMicInBackground())) openMic();
+  });
 }
 
 function closeMic() {
@@ -308,6 +328,7 @@ function keepMicInBackground() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  logEvent(document.hidden ? 'pagina in background' : 'pagina in primo piano');
   if (document.hidden) {
     if (!keepMicInBackground()) closeMic();
   } else if (state.joined) {
@@ -338,6 +359,7 @@ function startTx(source) {
     if (tx.granted) state.ws.send(e.data);
     else tx.pending.push(e.data);
   };
+  rec.onerror = (e) => logEvent('registrazione: errore ' + (e.error?.name || ''));
   rec.onstop = () => {
     tx.stopped = true;
     if (tx.granted) send({ t: 'ptt_stop' });
@@ -375,6 +397,7 @@ function onFloorGranted() {
   const tx = state.awaiting.shift();
   if (!tx) return;
   tx.granted = true;
+  if (tx.source === 'call') logEvent('in onda' + (document.hidden ? ' (in background)' : ''));
   tx.pending.forEach((b) => state.ws.send(b));
   tx.pending = [];
   if (tx.stopped) send({ t: 'ptt_stop' });
@@ -480,6 +503,7 @@ function connect() {
   state.ws = ws;
 
   ws.onopen = () => {
+    logEvent('server collegato');
     state.backoff = 500;
     send({ t: 'join', name: el.name.value.trim(), channel: el.channel.value.trim(), code: el.code.value });
   };
@@ -519,7 +543,12 @@ function connect() {
       }
       case 'talk_end':
         if (m.id === state.myId) {
-          stopTx();
+          // "stop" è la conferma di un mio ptt_stop: arriva quando potrei già essere
+          // ripartito con una nuova trasmissione, che non va chiusa.
+          if (m.reason !== 'stop') {
+            logEvent('il server ha chiuso la mia trasmissione: ' + m.reason);
+            stopTx();
+          }
         } else {
           releasePlayer(state.talkers.get(m.id)?.player);
           state.talkers.delete(m.id);
@@ -564,6 +593,7 @@ function connect() {
 
   ws.onclose = () => {
     if (state.ws !== ws) return;
+    logEvent('server scollegato: riconnetto');
     state.connected = false;
     clearTalkers();
     abortTx();
@@ -666,6 +696,14 @@ function render() {
   }));
 }
 
+// Registro degli ultimi eventi (mostrato nella diagnostica, sopravvive al background).
+const events = [];
+function logEvent(msg) {
+  const t = new Date().toLocaleTimeString('it-IT');
+  events.push(`${t} ${msg}`);
+  if (events.length > 14) events.shift();
+}
+
 let toastTimer = 0;
 function toast(msg) {
   el.toast.textContent = msg;
@@ -701,6 +739,7 @@ function join() {
     players.forEach((p) => { releasePlayer(p); p.reset(); });
   }
   updateKeepAlive();
+  if (el.diag.checked) ensureMeter();
   openMic();
   connect();
 
@@ -780,6 +819,19 @@ function setMode(mode) {
 el.modeRadio.addEventListener('click', () => setMode('radio'));
 el.modeCall.addEventListener('click', () => setMode('call'));
 
+// Livello del mio microfono. Silenzio *assoluto* (-inf dB) con il mic aperto vuol dire
+// che è Android a passare zeri a Chrome: succede quando l'app in background perde il
+// diritto al microfono. Un mic vero, anche in una stanza silenziosa, ha sempre rumore.
+const levelBuf = new Float32Array(1024);
+let silentSince = 0;
+function micLevel() {
+  if (!state.analyser) return null;
+  state.analyser.getFloatTimeDomainData(levelBuf);
+  let sum = 0;
+  for (let i = 0; i < levelBuf.length; i++) sum += levelBuf[i] * levelBuf[i];
+  return sum === 0 ? -Infinity : 10 * Math.log10(sum / levelBuf.length);
+}
+
 // Diagnostica: cosa sta facendo ogni lettore, per capire i problemi sui telefoni.
 let diagLast = performance.now();
 setInterval(() => {
@@ -789,10 +841,23 @@ setInterval(() => {
   diagLast = now;
   const track = state.stream?.getAudioTracks()[0];
   const tx = state.tx;
+  const level = micLevel();
+  if (level === -Infinity && state.stream) {
+    if (!silentSince) silentSince = now;
+    else if (now - silentSince > 2000 && silentSince > 0) {
+      logEvent('mic: silenzio assoluto, Android sta silenziando Chrome');
+      silentSince = -1;  // registrato, non ripetere finché torna il suono
+    }
+  } else if (level !== null) {
+    if (silentSince === -1) logEvent('mic: torna il suono');
+    silentSince = 0;
+  }
   const lines = [
     `modo ${state.mode}${state.callMuted ? ' (muto)' : ''} · ws ${state.connected ? 'ok' : 'giù'} · visibile ${!document.hidden}`,
     `mic ${track ? track.readyState + (track.muted ? ' MUTED' : '') + ' ' + JSON.stringify(track.getSettings().echoCancellation) : 'chiuso'}`
       + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ' ' + tx.source + ' rec=' + tx.rec.state : '-'}`,
+    `livello mic ${level === null ? '?' : level === -Infinity ? 'SILENZIO ASSOLUTO' : Math.round(level) + ' dB'}`
+      + ` · audioCtx ${state.audioCtx?.state ?? '-'}`,
   ];
   state.talkers.forEach((t, id) => {
     const kbps = Math.round(((t.bytes || 0) * 8) / 1000 / secs);
@@ -805,12 +870,21 @@ setInterval(() => {
       + ` t=${a.currentTime.toFixed(1)} lag=${Math.round(p.lag() * 1000)} vol=${a.volume} x${a.playbackRate}`
       + ` ms=${p.ms.readyState}${a.error ? ' ERR ' + a.error.message : ''}`);
   });
+  lines.push('— eventi —', ...events);
   el.diagOut.textContent = lines.join('\n');
 }, 1000);
 el.bgMic.addEventListener('change', () => store('bgMic', el.bgMic.checked ? '1' : '0'));
+// Serve un AudioContext (solo per misurare, non collegato all'uscita): va creato in un gesto.
+function ensureMeter() {
+  if (!state.audioCtx) state.audioCtx = new AudioContext();
+  state.audioCtx.resume();
+  attachAnalyser();
+}
+
 el.diag.addEventListener('change', () => {
   el.diagOut.hidden = !el.diag.checked;
   store('diag', el.diag.checked ? '1' : '0');
+  if (el.diag.checked) ensureMeter();
 });
 
 el.vox.addEventListener('change', async () => {
