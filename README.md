@@ -24,6 +24,9 @@ vede come una chiamata, l'audio esce sul canale **Musica** e il telefono resta l
   In Chiamata ogni trasmissione è uno stream webm senza fine: quando entra qualcuno il
   server manda `resync` a chi è in chiamata, che riparte con uno stream nuovo così il
   nuovo arrivato riceve l'header. Le chiamate non hanno il limite dei 120 s.
+- **Microfono anche fuori dal browser** (opzione della modalità Chiamata, spenta di
+  default): passando a un'altra app il microfono resta aperto e la trasmissione continua.
+  Chrome Android mantiene la cattura in background con la notifica "microfono in uso".
 - **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
   ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
 - **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante, quindi

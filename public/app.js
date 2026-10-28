@@ -41,7 +41,7 @@ const el = {
   users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
   players: $('#players'), ka: $('#ka'), toast: $('#toast'),
   modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
-  diag: $('#diag'), diagOut: $('#diagOut'),
+  diag: $('#diag'), diagOut: $('#diagOut'), bgMic: $('#bgMic'),
 };
 
 const state = {
@@ -273,7 +273,7 @@ function openMic() {
       channelCount: 1,
     },
   }).then((s) => {
-    if (document.hidden || !state.joined) {
+    if ((document.hidden && !keepMicInBackground()) || !state.joined) {
       s.getTracks().forEach((t) => t.stop());
       return null;
     }
@@ -301,9 +301,15 @@ function closeMic() {
   render();
 }
 
+// Opzione della modalità Chiamata: il microfono resta aperto anche fuori dal browser
+// (Chrome Android mantiene la cattura in background con la sua notifica "microfono in uso").
+function keepMicInBackground() {
+  return state.joined && state.mode === 'call' && !state.callMuted && el.bgMic.checked;
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    closeMic();
+    if (!keepMicInBackground()) closeMic();
   } else if (state.joined) {
     openMic();
     players.forEach((p) => p.play());
@@ -347,11 +353,13 @@ function startTx(source) {
   render();
 }
 
-// Modalità chiamata: finché la pagina è visibile e il mic non è silenziato si trasmette
-// sempre. Riparte da sola dopo un resync, una riconnessione o il ritorno in primo piano.
+// Modalità chiamata: finché la pagina è visibile (o il mic resta attivo in background)
+// e il mic non è silenziato si trasmette sempre. Riparte da sola dopo un resync,
+// una riconnessione o il ritorno in primo piano.
 function ensureCall() {
   if (state.mode !== 'call' || state.callMuted || state.tx || !state.joined || !state.connected
-    || !state.stream || document.hidden || Date.now() < state.callRetryAt) return;
+    || !state.stream || (document.hidden && !keepMicInBackground())
+    || Date.now() < state.callRetryAt) return;
   startTx('call');
 }
 setInterval(ensureCall, 500);
@@ -799,6 +807,7 @@ setInterval(() => {
   });
   el.diagOut.textContent = lines.join('\n');
 }, 1000);
+el.bgMic.addEventListener('change', () => store('bgMic', el.bgMic.checked ? '1' : '0'));
 el.diag.addEventListener('change', () => {
   el.diagOut.hidden = !el.diag.checked;
   store('diag', el.diag.checked ? '1' : '0');
@@ -845,6 +854,7 @@ el.keepAlive.addEventListener('change', () => {
   el.voxThr.value = load('voxThr') || el.voxThr.value;
   state.mode = load('mode') === 'call' ? 'call' : 'radio';
   el.diag.checked = load('diag') === '1';
+  el.bgMic.checked = load('bgMic') === '1';
   el.diagOut.hidden = !el.diag.checked;
   el.duck.checked = load('duck') === '1';
   el.headphones.checked = load('headphones') === '1';

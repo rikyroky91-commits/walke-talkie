@@ -45,7 +45,14 @@
       <button type="button" id="modeRadio" class="seg">📻 Radio</button>
       <button type="button" id="modeCall" class="seg">📞 Chiamata</button>
     </div>
-    <p id="callHint" class="hint" hidden>Microfono sempre aperto finché la pagina è in primo piano. In vivavoce senza cuffie ognuno sente l'eco della propria voce: usate le cuffie.</p>
+    <div id="callHint" class="call-opts" hidden>
+      <p class="hint">Microfono sempre aperto. In vivavoce senza cuffie ognuno sente l'eco della propria voce: usate le cuffie.</p>
+      <label class="switch">
+        <input type="checkbox" id="bgMic">
+        <span>Microfono attivo anche fuori dal browser</span>
+      </label>
+      <p class="hint">I colleghi continuano a sentirti mentre usi altre app (Android mostra il pallino verde del microfono). Per smettere: "silenzia" oppure "Esci".</p>
+    </div>
 
     <div id="status" class="status">Connessione…</div>
 
