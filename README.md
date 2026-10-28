@@ -54,6 +54,18 @@ Opzioni:
 
 Link diretto a un canale: `https://server/?c=magazzino`.
 
+## Pubblicazione su Render
+
+1. Carica questo repository su GitHub (anche privato).
+2. Su [render.com](https://render.com): **New → Blueprint** e scegli il repository.
+   Render legge `render.yaml`, chiede il valore di `ACCESS_CODE` (il codice per i
+   colleghi) e crea il servizio a Francoforte con HTTPS incluso.
+3. L'app sarà su `https://walkie-talkie-xxxx.onrender.com`. Ogni `git push` la aggiorna.
+
+Piano gratuito: dopo 15 minuti senza traffico il servizio si spegne e la prima apertura
+successiva impiega ~1 minuto. Le pagine aperte si riconnettono da sole. Per averlo sempre
+acceso cambia `plan: free` in `plan: starter` ($7/mese) o modificalo dalla dashboard.
+
 ## Latenza misurata
 
 Test in locale (Chrome desktop, mittente e ricevente sulla stessa macchina, 4 trasmissioni
