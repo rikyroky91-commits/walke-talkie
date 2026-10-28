@@ -14,11 +14,16 @@
 
 const TIMESLICE = 60;         // ms per chunk: Chrome codifica opus a frame da 60 ms, sotto non serve
 const BITRATE = 32000;        // bps opus mono, ottimo per la voce
-// La pipeline MSE di Chrome vuole ~200 ms di audio davanti a sé: sotto va in underrun
-// (glitch udibile) e dopo ogni underrun alza da sola la soglia di avvio.
-const TARGET_LAG = 0.22;      // s: buffer da mantenere
-const FAST_LAG = 0.4;         // s: oltre, accelera la riproduzione (1.15x, pitch invariato)
-const MAX_LAG = 0.8;          // s: oltre, salta in avanti (glitch udibile, solo in casi estremi)
+// Buffer adattivo. La pipeline MSE di Chrome vuole almeno ~200 ms davanti a sé, e sulla
+// rete mobile i pacchetti arrivano a raffiche: il buffer parte basso, cresce a ogni
+// interruzione e scende piano quando la rete è stabile. L'audio non si butta mai
+// (sentiresti pezzi di frase), salvo ritardi enormi.
+const BUF_MIN = 0.25;         // s
+const BUF_MAX = 1.2;          // s
+const BUF_STEP = 0.15;        // s in più a ogni interruzione
+const BUF_DECAY_MS = 20000;   // senza interruzioni per 20 s il buffer scende di 50 ms
+const DROP_LAG = 3.0;         // s oltre l'obiettivo: solo qui si salta in avanti
+const jitter = { target: BUF_MIN, lastChange: 0, underruns: 0 };
 const PLAYER_SLOTS = 4;       // voci contemporanee (uguale a MAX_SPEAKERS del server)
 const DUCK_VOLUME = 0.2;      // volume degli altri mentre parli, se "Abbassa gli altri" è attivo
 const VOX_HANG_MS = 900;      // la trasmissione VOX resta aperta dopo l'ultima voce
@@ -79,7 +84,16 @@ class StreamPlayer {
     el.players.append(this.audio);
     this.owner = null;    // id di chi sta usando questo lettore
     this.freedAt = 0;
+    this.segStart = 0;
     this.queue = [];
+    // Buffer finito mentre la voce è ancora attiva = interruzione udibile: più margine.
+    // (Esclusi l'avvio di ogni stream e la fine di una trasmissione.)
+    this.audio.addEventListener('waiting', () => {
+      if (!this.owner || performance.now() - this.segStart < 1500) return;
+      jitter.underruns++;
+      jitter.target = Math.min(BUF_MAX, jitter.target + BUF_STEP);
+      jitter.lastChange = performance.now();
+    });
     this.reset();
   }
 
@@ -121,6 +135,7 @@ class StreamPlayer {
   //   si accoda allo stesso SourceBuffer resettando il parser con abort(). Funziona sempre
   //   ma Chrome, dopo ogni buffer vuoto, alza la soglia di avvio (~0.6 s).
   beginSegment() {
+    this.segStart = performance.now();
     if (!document.hidden) { this.reset(); return; }
     this.queue.push('NEW_SEGMENT');
     this.play();
@@ -157,21 +172,22 @@ class StreamPlayer {
     this.evict(false);
   }
 
-  // Tiene la latenza vicino a TARGET_LAG: piccoli ritardi si recuperano accelerando
-  // (impercettibile), quelli grandi saltando in avanti.
+  // Tiene la latenza vicino a jitter.target recuperando il ritardo con una riproduzione
+  // appena più veloce (6–12%, tono della voce invariato). Salta in avanti solo con
+  // ritardi enormi.
   catchUp() {
     const a = this.audio;
     const b = a.buffered;
     if (!b.length) return;
     const end = b.end(b.length - 1);
     const lag = end - a.currentTime;
-    if (lag > MAX_LAG) {
-      a.currentTime = Math.max(b.start(b.length - 1), end - TARGET_LAG);
-    } else if (lag > FAST_LAG) {
-      a.playbackRate = 1.15;
-    } else if (lag > TARGET_LAG + 0.08) {
-      a.playbackRate = Math.max(a.playbackRate === 1.15 ? 1.15 : 1, 1.05);
-    } else if (lag < TARGET_LAG) {
+    if (lag > jitter.target + DROP_LAG) {
+      a.currentTime = Math.max(b.start(b.length - 1), end - jitter.target);
+    } else if (lag > jitter.target + 0.5) {
+      a.playbackRate = 1.12;
+    } else if (lag > jitter.target + 0.15) {
+      a.playbackRate = Math.max(a.playbackRate === 1.12 ? 1.12 : 1, 1.06);
+    } else if (lag <= jitter.target) {
       a.playbackRate = 1;
     }
     this.play();
@@ -608,6 +624,11 @@ function connect() {
 setInterval(() => send({ t: 'ping', ts: performance.now() }), 5000);
 setInterval(() => {
   if (!state.joined) return;
+  const now = performance.now();
+  if (jitter.target > BUF_MIN && now - jitter.lastChange > BUF_DECAY_MS) {
+    jitter.target = Math.max(BUF_MIN, jitter.target - 0.05);
+    jitter.lastChange = now;
+  }
   let lag = 0;
   state.talkers.forEach((t) => {
     if (!t.rx) return;
@@ -858,6 +879,7 @@ setInterval(() => {
       + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ' ' + tx.source + ' rec=' + tx.rec.state : '-'}`,
     `livello mic ${level === null ? '?' : level === -Infinity ? 'SILENZIO ASSOLUTO' : Math.round(level) + ' dB'}`
       + ` · audioCtx ${state.audioCtx?.state ?? '-'}`,
+    `buffer obiettivo ${Math.round(jitter.target * 1000)} ms · interruzioni ${jitter.underruns}`,
   ];
   state.talkers.forEach((t, id) => {
     const kbps = Math.round(((t.bytes || 0) * 8) / 1000 / secs);
