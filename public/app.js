@@ -20,7 +20,7 @@ const TARGET_LAG = 0.22;      // s: buffer da mantenere
 const FAST_LAG = 0.4;         // s: oltre, accelera la riproduzione (1.15x, pitch invariato)
 const MAX_LAG = 0.8;          // s: oltre, salta in avanti (glitch udibile, solo in casi estremi)
 const PLAYER_SLOTS = 4;       // voci contemporanee (uguale a MAX_SPEAKERS del server)
-const DUCK_VOLUME = 0.2;      // volume degli altri mentre parli senza cuffie
+const DUCK_VOLUME = 0.2;      // volume degli altri mentre parli, se "Abbassa gli altri" è attivo
 const VOX_HANG_MS = 900;      // la trasmissione VOX resta aperta dopo l'ultima voce
 const VOX_RX_GUARD_MS = 600;  // niente VOX subito dopo una ricezione (coda dell'altoparlante)
 const ID_LEN = 8;             // byte di id di chi parla in testa a ogni frame audio
@@ -37,7 +37,7 @@ const el = {
   ptt: $('#ptt'), pttLabel: $('#pttLabel'), vox: $('#vox'), mic: $('#mic'),
   voxPanel: $('#voxPanel'), meterBar: $('#meterBar'), meterThr: $('#meterThr'),
   voxThr: $('#voxThr'), voxThrVal: $('#voxThrVal'), volume: $('#volume'),
-  headphones: $('#headphones'), keepAlive: $('#keepAlive'),
+  duck: $('#duck'), headphones: $('#headphones'), keepAlive: $('#keepAlive'),
   users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
   players: $('#players'), ka: $('#ka'), toast: $('#toast'),
 };
@@ -204,7 +204,7 @@ function releasePlayer(p) {
 
 function applyVolume() {
   const tx = state.tx;
-  const duck = !el.headphones.checked && tx && tx.granted && !tx.stopped;
+  const duck = el.duck.checked && tx && tx.granted && !tx.stopped;
   const v = Number(el.volume.value) * (duck ? DUCK_VOLUME : 1);
   players.forEach((p) => { p.audio.volume = v; });
 }
@@ -720,9 +720,12 @@ const showThr = () => {
 };
 el.voxThr.addEventListener('input', showThr);
 el.volume.addEventListener('input', applyVolume);
+el.duck.addEventListener('change', () => {
+  store('duck', el.duck.checked ? '1' : '0');
+  applyVolume();
+});
 el.headphones.addEventListener('change', () => {
   store('headphones', el.headphones.checked ? '1' : '0');
-  applyVolume();
 });
 el.keepAlive.addEventListener('change', () => {
   store('keepAlive', el.keepAlive.checked ? '1' : '0');
@@ -736,6 +739,7 @@ el.keepAlive.addEventListener('change', () => {
   el.name.value = load('name') || '';
   el.channel.value = params.get('c') || load('channel') || '';
   el.voxThr.value = load('voxThr') || el.voxThr.value;
+  el.duck.checked = load('duck') === '1';
   el.headphones.checked = load('headphones') === '1';
   el.keepAlive.checked = load('keepAlive') !== '0';
   showThr();

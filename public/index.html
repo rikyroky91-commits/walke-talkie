@@ -65,10 +65,15 @@
       <summary>Impostazioni</summary>
       <label>Volume <input id="volume" type="range" min="0" max="1" step="0.05" value="1"></label>
       <label class="switch">
+        <input type="checkbox" id="duck">
+        <span>Abbassa gli altri mentre parlo</span>
+      </label>
+      <p class="hint">Riduce l'eco in vivavoce: mentre tieni premuto, i colleghi si sentono al 20%.</p>
+      <label class="switch">
         <input type="checkbox" id="headphones">
         <span>Uso le cuffie</span>
       </label>
-      <p class="hint">Senza cuffie, mentre parli il volume degli altri si abbassa e il VOX non scatta mentre parlano loro: evita eco e fischi dall'altoparlante.</p>
+      <p class="hint">Senza cuffie il VOX non scatta mentre parlano gli altri, altrimenti scambierebbe la loro voce dall'altoparlante per la tua.</p>
       <label class="switch">
         <input type="checkbox" id="keepAlive" checked>
         <span>Mantieni attivo in background</span>

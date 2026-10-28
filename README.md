@@ -19,10 +19,11 @@ vede come una chiamata, l'audio esce sul canale **Musica** e il telefono resta l
   `<audio>` (creati all'ingresso, così l'autoplay è sbloccato anche in background) e
   assegna a ogni voce un lettore libero. Android li mixa sul canale Musica. La quinta
   persona riceve "Canale pieno".
-- **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante.
-  Per questo, se non hai attivato "Uso le cuffie", mentre parli il volume degli altri
-  scende al 20% e il VOX non scatta mentre parlano gli altri (in vivavoce il VOX resta
-  quindi a turni; il PTT no). Con le cuffie tutto è libero.
+- **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante, quindi
+  in vivavoce chi parla insieme a te può sentire un'eco della propria voce. Rimedi, nelle
+  Impostazioni: "Abbassa gli altri mentre parlo" (spento di default: mentre tieni premuto
+  gli altri scendono al 20%) oppure le cuffie. Senza "Uso le cuffie" il VOX non scatta
+  mentre parlano gli altri; il PTT funziona sempre in contemporanea.
 - **Microfono solo con pagina visibile**: su `visibilitychange` → `hidden` tutte le
   tracce vengono fermate (`track.stop()`), l'indicatore microfono di Android si spegne.
   L'`<audio>` continua a suonare in background.

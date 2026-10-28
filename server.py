@@ -251,6 +251,12 @@ async def healthz(request: web.Request):
     return web.Response(text="ok")
 
 
+async def no_cache(request: web.Request, response: web.StreamResponse):
+    # Il browser rivalida sempre (304 se invariato): dopo un deploy i telefoni
+    # prendono subito il nuovo app.js invece di quello in cache.
+    response.headers.setdefault("Cache-Control", "no-cache")
+
+
 def self_signed_context() -> ssl.SSLContext:
     from datetime import datetime, timedelta, timezone
 
@@ -317,6 +323,7 @@ def main():
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/healthz", healthz)
     app.router.add_static("/", PUBLIC, show_index=False)
+    app.on_response_prepare.append(no_cache)
     app.on_startup.append(start_background)
     app.on_cleanup.append(stop_background)
 
