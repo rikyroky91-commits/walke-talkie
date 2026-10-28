@@ -5,10 +5,11 @@
  *
  * Invio:     getUserMedia (AEC/NS/AGC disattivati) -> MediaRecorder webm/opus a chunk
  *            da TIMESLICE ms -> WebSocket (frame binari).
- * Ricezione: WebSocket -> MediaSource/SourceBuffer ("sequence") -> <audio>.
- *            Su Android Chrome riproduce sul canale media (STREAM_MUSIC), non come chiamata.
+ * Ricezione: WebSocket -> [id 8 byte | chunk] -> MediaSource/SourceBuffer -> <audio>.
+ *            Un <audio> per ogni voce attiva (fino a PLAYER_SLOTS in contemporanea):
+ *            su Android Chrome li mixa sul canale media (STREAM_MUSIC), non come chiamata.
  * Mic:       aperto solo con la pagina visibile; su visibilitychange(hidden) le tracce
- *            vengono fermate, l'<audio> continua a suonare in background.
+ *            vengono fermate, gli <audio> continuano a suonare in background.
  */
 
 const TIMESLICE = 60;         // ms per chunk: Chrome codifica opus a frame da 60 ms, sotto non serve
@@ -18,8 +19,11 @@ const BITRATE = 32000;        // bps opus mono, ottimo per la voce
 const TARGET_LAG = 0.22;      // s: buffer da mantenere
 const FAST_LAG = 0.4;         // s: oltre, accelera la riproduzione (1.15x, pitch invariato)
 const MAX_LAG = 0.8;          // s: oltre, salta in avanti (glitch udibile, solo in casi estremi)
+const PLAYER_SLOTS = 4;       // voci contemporanee (uguale a MAX_SPEAKERS del server)
+const DUCK_VOLUME = 0.2;      // volume degli altri mentre parli senza cuffie
 const VOX_HANG_MS = 900;      // la trasmissione VOX resta aperta dopo l'ultima voce
 const VOX_RX_GUARD_MS = 600;  // niente VOX subito dopo una ricezione (coda dell'altoparlante)
+const ID_LEN = 8;             // byte di id di chi parla in testa a ogni frame audio
 const PLAY_MIME = 'audio/webm;codecs=opus';
 const REC_MIME = ['audio/webm;codecs=opus', 'audio/webm']
   .find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
@@ -32,9 +36,10 @@ const el = {
   chName: $('#chName'), conn: $('#conn'), leave: $('#leave'), status: $('#status'),
   ptt: $('#ptt'), pttLabel: $('#pttLabel'), vox: $('#vox'), mic: $('#mic'),
   voxPanel: $('#voxPanel'), meterBar: $('#meterBar'), meterThr: $('#meterThr'),
-  voxThr: $('#voxThr'), voxThrVal: $('#voxThrVal'), volume: $('#volume'), keepAlive: $('#keepAlive'),
+  voxThr: $('#voxThr'), voxThrVal: $('#voxThrVal'), volume: $('#volume'),
+  headphones: $('#headphones'), keepAlive: $('#keepAlive'),
   users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
-  rx: $('#rx'), ka: $('#ka'), toast: $('#toast'),
+  players: $('#players'), ka: $('#ka'), toast: $('#toast'),
 };
 
 const state = {
@@ -45,8 +50,7 @@ const state = {
   myId: null,
   channel: '',
   users: [],
-  talking: null,      // {id, name} di chi ha il canale (non io)
-  rxActive: false,    // sto ricevendo audio di questa trasmissione
+  talkers: new Map(), // id -> {name, player, rx}: chi sta parlando (escluso me)
   rxEndedAt: 0,
   stream: null,
   micOpening: null,
@@ -64,8 +68,12 @@ const state = {
 /* ---------------------------------------------------------------- Player MSE */
 
 class StreamPlayer {
-  constructor(audio) {
-    this.audio = audio;
+  constructor() {
+    this.audio = document.createElement('audio');
+    this.audio.playsInline = true;
+    el.players.append(this.audio);
+    this.owner = null;    // id di chi sta usando questo lettore
+    this.freedAt = 0;
     this.queue = [];
     this.reset();
   }
@@ -145,7 +153,7 @@ class StreamPlayer {
   }
 
   // Tiene la latenza vicino a TARGET_LAG: piccoli ritardi si recuperano accelerando
-  // del 7% (impercettibile), quelli grandi saltando in avanti.
+  // (impercettibile), quelli grandi saltando in avanti.
   catchUp() {
     const a = this.audio;
     const b = a.buffered;
@@ -179,7 +187,27 @@ class StreamPlayer {
   }
 }
 
-let player = null;
+const players = [];
+
+// Il lettore libero da più tempo, così la coda audio di chi ha appena finito non viene tagliata.
+function acquirePlayer(id) {
+  const free = players.filter((p) => !p.owner).sort((a, b) => a.freedAt - b.freedAt)[0];
+  if (free) free.owner = id;
+  return free || null;
+}
+
+function releasePlayer(p) {
+  if (!p) return;
+  p.owner = null;
+  p.freedAt = performance.now();
+}
+
+function applyVolume() {
+  const tx = state.tx;
+  const duck = !el.headphones.checked && tx && tx.granted && !tx.stopped;
+  const v = Number(el.volume.value) * (duck ? DUCK_VOLUME : 1);
+  players.forEach((p) => { p.audio.volume = v; });
+}
 
 /* ------------------------------------------------------------- Keep-alive */
 
@@ -207,14 +235,23 @@ function updateKeepAlive() {
   }
 }
 
+function talkerNames() {
+  return [...state.talkers.values()].map((t) => t.name);
+}
+
+function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  const names = talkerNames();
+  navigator.mediaSession.metadata = names.length
+    ? new MediaMetadata({ title: names.join(', ') + (names.length > 1 ? ' parlano' : ' sta parlando'), artist: 'Canale ' + state.channel })
+    : new MediaMetadata({ title: 'Canale ' + state.channel, artist: 'Walkie-Talkie' });
+}
+
 function setupMediaSession() {
   if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: 'Canale ' + state.channel,
-    artist: 'Walkie-Talkie',
-  });
-  navigator.mediaSession.setActionHandler('play', () => { player?.play(); updateKeepAlive(); });
-  navigator.mediaSession.setActionHandler('pause', () => { el.rx.pause(); el.ka.pause(); });
+  updateMediaSession();
+  navigator.mediaSession.setActionHandler('play', () => { players.forEach((p) => p.play()); updateKeepAlive(); });
+  navigator.mediaSession.setActionHandler('pause', () => { players.forEach((p) => p.audio.pause()); el.ka.pause(); });
 }
 
 /* --------------------------------------------------------------- Microfono */
@@ -263,7 +300,7 @@ document.addEventListener('visibilitychange', () => {
     closeMic();
   } else if (state.joined) {
     openMic();
-    player?.play();
+    players.forEach((p) => p.play());
     updateKeepAlive();
   }
 });
@@ -273,10 +310,6 @@ window.addEventListener('pagehide', closeMic);
 
 function startTx(source) {
   if (state.tx || !state.joined || !state.connected) return;
-  if (state.talking) {
-    if (source === 'ptt') busy(state.talking.name);
-    return;
-  }
   if (!state.stream) {
     if (source === 'ptt') toast(state.micOpening ? 'Microfono in apertura…' : 'Microfono non disponibile');
     openMic();
@@ -300,8 +333,8 @@ function startTx(source) {
     render();
   };
 
-  // Registra subito (per non perdere la prima sillaba) e invia appena il server concede il canale.
-  send({ t: 'ptt_start', mime: REC_MIME });
+  // Registra subito (per non perdere la prima sillaba) e invia appena il server dà il via.
+  send({ t: 'ptt_start' });
   rec.start(TIMESLICE);
   vibrate(25);
   render();
@@ -324,13 +357,13 @@ function onFloorGranted() {
   render();
 }
 
-function onFloorDenied(by) {
+function onFloorDenied() {
   const tx = state.awaiting.shift();
   if (!tx) return;
   tx.denied = true;
   tx.pending = [];
   if (tx.rec.state !== 'inactive') tx.rec.stop();
-  if (tx.source === 'ptt') busy(by?.name);
+  if (tx.source === 'ptt') busy();
 }
 
 function abortTx() {
@@ -342,10 +375,10 @@ function abortTx() {
   }
 }
 
-function busy(name) {
+function busy() {
   state.busyUntil = Date.now() + 1500;
   vibrate([60, 40, 60]);
-  toast('Canale occupato' + (name ? ': parla ' + name : ''));
+  toast(`Canale pieno: parlano già ${PLAYER_SLOTS} persone`);
   render();
   setTimeout(render, 1600);
 }
@@ -379,8 +412,10 @@ function voxTick() {
   const db = 20 * Math.log10(Math.sqrt(sum / voxBuf.length) + 1e-9);
   el.meterBar.style.width = Math.min(100, Math.max(0, (db + 70) / 60 * 100)) + '%';
 
+  // In vivavoce il mic sente gli altri: il VOX li scambierebbe per la tua voce.
   const now = performance.now();
-  const blocked = state.talking || Date.now() - state.rxEndedAt < VOX_RX_GUARD_MS;
+  const blocked = !el.headphones.checked
+    && (state.talkers.size > 0 || Date.now() - state.rxEndedAt < VOX_RX_GUARD_MS);
   if (db > state.voxThr && !blocked) {
     state.voxLastLoud = now;
     if (!state.tx) startTx('vox');
@@ -396,6 +431,17 @@ function send(obj) {
   if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify(obj));
 }
 
+function clearTalkers() {
+  state.talkers.forEach((t) => releasePlayer(t.player));
+  state.talkers.clear();
+}
+
+function onAudio(buf) {
+  const id = String.fromCharCode(...new Uint8Array(buf, 0, ID_LEN));
+  const t = state.talkers.get(id);
+  if (t?.rx) t.player.push(buf.slice(ID_LEN));
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   const ws = new WebSocket(proto + location.host + '/ws');
@@ -409,7 +455,7 @@ function connect() {
 
   ws.onmessage = (ev) => {
     if (typeof ev.data !== 'string') {
-      if (state.rxActive) player.push(ev.data);
+      onAudio(ev.data);
       return;
     }
     const m = JSON.parse(ev.data);
@@ -419,8 +465,9 @@ function connect() {
         state.myId = m.id;
         state.channel = m.channel;
         state.users = m.users;
-        state.talking = m.talking;   // se entro a metà trasmissione ascolto dalla prossima
-        state.rxActive = false;
+        clearTalkers();
+        // Chi sta già parlando lo ascolti dalla sua prossima trasmissione.
+        m.talking.forEach((u) => state.talkers.set(u.id, { name: u.name, player: null, rx: false }));
         el.chName.textContent = m.channel;
         history.replaceState(null, '', '?c=' + encodeURIComponent(m.channel));
         setupMediaSession();
@@ -428,32 +475,36 @@ function connect() {
       case 'users':
         state.users = m.users;
         break;
-      case 'talk_start':
-        state.talking = { id: m.id, name: m.name };
-        state.rxActive = true;
-        player.beginSegment();
-        if ('mediaSession' in navigator) {
-          navigator.mediaSession.metadata = new MediaMetadata({ title: m.name + ' sta parlando', artist: 'Canale ' + state.channel });
-        }
+      case 'talk_start': {
+        const t = state.talkers.get(m.id) || { name: m.name, player: null, rx: false };
+        t.player = t.player || acquirePlayer(m.id);
+        t.rx = !!t.player;
+        t.player?.beginSegment();
+        state.talkers.set(m.id, t);
+        applyVolume();
+        updateMediaSession();
         break;
+      }
       case 'talk_end':
         if (m.id === state.myId) {
           stopTx();
         } else {
-          state.talking = null;
-          state.rxActive = false;
+          releasePlayer(state.talkers.get(m.id)?.player);
+          state.talkers.delete(m.id);
           state.rxEndedAt = Date.now();
-          setupMediaSession();
+          updateMediaSession();
         }
         break;
-      case 'talk_skip':
-        state.rxActive = false;
+      case 'talk_skip': {
+        const t = state.talkers.get(m.id);
+        if (t) t.rx = false;
         break;
+      }
       case 'floor_granted':
         onFloorGranted();
         break;
       case 'floor_denied':
-        onFloorDenied(m.by);
+        onFloorDenied();
         break;
       case 'tx_limit':
         toast('Trasmissione troppo lunga, chiusa automaticamente');
@@ -478,8 +529,7 @@ function connect() {
   ws.onclose = () => {
     if (state.ws !== ws) return;
     state.connected = false;
-    state.talking = null;
-    state.rxActive = false;
+    clearTalkers();
     abortTx();
     render();
     if (state.joined) {
@@ -491,9 +541,14 @@ function connect() {
 
 setInterval(() => send({ t: 'ping', ts: performance.now() }), 5000);
 setInterval(() => {
-  if (!player || !state.joined) return;
-  if (state.rxActive) player.catchUp();
-  el.lag.textContent = 'buffer ' + Math.round(player.lag() * 1000) + ' ms';
+  if (!state.joined) return;
+  let lag = 0;
+  state.talkers.forEach((t) => {
+    if (!t.rx) return;
+    t.player.catchUp();
+    lag = Math.max(lag, t.player.lag());
+  });
+  el.lag.textContent = 'buffer ' + Math.round(lag * 1000) + ' ms';
 }, 100);
 
 /* --------------------------------------------------------------------- UI */
@@ -505,23 +560,27 @@ function render() {
   el.mic.className = 'pill ' + (state.stream ? 'ok' : '');
 
   const tx = state.tx;
+  const names = talkerNames();
+  const onAir = tx && tx.granted && !tx.stopped;
   let status = 'In ascolto';
   let cls = '';
   let label = 'Tieni premuto<br>per parlare';
   if (!state.connected) {
     status = 'Connessione…';
-  } else if (tx && tx.granted && !tx.stopped) {
-    status = 'IN ONDA';
+  } else if (onAir) {
+    status = 'IN ONDA' + (names.length ? ' · con ' + names.join(', ') : '');
     cls = 'tx';
     label = tx.source === 'vox' ? 'VOX attivo' : 'Rilascia per<br>chiudere';
   } else if (tx && !tx.granted && !tx.denied) {
-    status = 'Richiesta canale…';
+    status = 'Apertura…';
     cls = 'busy';
-  } else if (state.talking) {
-    status = '🔊 ' + state.talking.name + (state.rxActive ? ' sta parlando' : ' sta parlando (ascolti dalla prossima)');
+  } else if (names.length) {
+    const late = [...state.talkers.values()].some((t) => !t.rx);
+    status = '🔊 ' + names.join(', ') + (names.length > 1 ? ' parlano' : ' sta parlando')
+      + (late ? ' (ascolti dalla prossima)' : '');
     cls = 'rx';
   } else if (Date.now() < state.busyUntil) {
-    status = 'Canale occupato';
+    status = 'Canale pieno';
     cls = 'busy';
   }
   el.status.textContent = status;
@@ -529,6 +588,7 @@ function render() {
   el.ptt.className = 'ptt ' + (cls === 'tx' ? 'live' : cls === 'busy' ? 'pending' : cls);
   el.pttLabel.innerHTML = label;
   el.ptt.disabled = !state.connected;
+  applyVolume();
 
   el.userCount.textContent = state.users.length ? '(' + state.users.length + ')' : '';
   el.users.replaceChildren(...state.users.map((u) => {
@@ -541,8 +601,8 @@ function render() {
       me.className = 'me';
       me.textContent = 'tu';
       li.append(me);
-      if (cls === 'tx') li.className = 'me-talking';
-    } else if (state.talking?.id === u.id) {
+      if (onAir) li.className = 'me-talking';
+    } else if (state.talkers.has(u.id)) {
       li.className = 'talking';
     }
     return li;
@@ -577,9 +637,12 @@ function join() {
   store('channel', el.channel.value.trim());
 
   state.joined = true;
-  // Siamo dentro un gesto dell'utente: sblocca l'autoplay dei due <audio>.
-  if (!player) player = new StreamPlayer(el.rx);
-  else player.reset();
+  // Siamo dentro un gesto dell'utente: sblocca l'autoplay di tutti gli <audio>.
+  if (!players.length) {
+    for (let i = 0; i < PLAYER_SLOTS; i++) players.push(new StreamPlayer());
+  } else {
+    players.forEach((p) => { releasePlayer(p); p.reset(); });
+  }
   updateKeepAlive();
   openMic();
   connect();
@@ -597,9 +660,9 @@ function leave() {
   state.ws = null;
   ws?.close();
   state.connected = false;
-  state.talking = null;
+  clearTalkers();
   state.users = [];
-  el.rx.pause();
+  players.forEach((p) => p.audio.pause());
   updateKeepAlive();
   el.radio.hidden = true;
   el.join.hidden = false;
@@ -656,7 +719,11 @@ const showThr = () => {
   store('voxThr', el.voxThr.value);
 };
 el.voxThr.addEventListener('input', showThr);
-el.volume.addEventListener('input', () => { el.rx.volume = Number(el.volume.value); });
+el.volume.addEventListener('input', applyVolume);
+el.headphones.addEventListener('change', () => {
+  store('headphones', el.headphones.checked ? '1' : '0');
+  applyVolume();
+});
 el.keepAlive.addEventListener('change', () => {
   store('keepAlive', el.keepAlive.checked ? '1' : '0');
   updateKeepAlive();
@@ -669,6 +736,7 @@ el.keepAlive.addEventListener('change', () => {
   el.name.value = load('name') || '';
   el.channel.value = params.get('c') || load('channel') || '';
   el.voxThr.value = load('voxThr') || el.voxThr.value;
+  el.headphones.checked = load('headphones') === '1';
   el.keepAlive.checked = load('keepAlive') !== '0';
   showThr();
 

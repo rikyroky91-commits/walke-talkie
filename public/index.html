@@ -65,6 +65,11 @@
       <summary>Impostazioni</summary>
       <label>Volume <input id="volume" type="range" min="0" max="1" step="0.05" value="1"></label>
       <label class="switch">
+        <input type="checkbox" id="headphones">
+        <span>Uso le cuffie</span>
+      </label>
+      <p class="hint">Senza cuffie, mentre parli il volume degli altri si abbassa e il VOX non scatta mentre parlano loro: evita eco e fischi dall'altoparlante.</p>
+      <label class="switch">
         <input type="checkbox" id="keepAlive" checked>
         <span>Mantieni attivo in background</span>
       </label>
@@ -77,8 +82,8 @@
     <footer><span id="rtt">RTT —</span> · <span id="lag">buffer —</span></footer>
   </section>
 
-  <!-- Playback ricezione (MSE) + keep-alive -->
-  <audio id="rx" playsinline></audio>
+  <!-- Lettori di ricezione (MSE, uno per voce, creati all'ingresso) + keep-alive -->
+  <div id="players" hidden></div>
   <audio id="ka" playsinline loop></audio>
 
   <div id="toast" class="toast" hidden></div>

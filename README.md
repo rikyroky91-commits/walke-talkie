@@ -10,13 +10,19 @@ vede come una chiamata, l'audio esce sul canale **Musica** e il telefono resta l
  [Chi parla]                                   [Chi ascolta]
  getUserMedia (AEC/NS/AGC OFF)                 WebSocket (binaryType=arraybuffer)
    └─ MediaRecorder webm/opus, chunk 60 ms       └─ MediaSource + SourceBuffer ("sequence")
-        └─ WebSocket ──► server.py ──► altri          └─ <audio>  → STREAM_MUSIC
+        └─ WebSocket ──► server.py ──► altri          └─ un <audio> per voce → STREAM_MUSIC
+                         [id 8 byte | chunk]
 ```
 
-- **Half-duplex con "floor control"**: parla uno alla volta, come una radio vera. Se
-  qualcuno sta già parlando, il tuo PTT riceve "Canale occupato" (con vibrazione).
-  Questo evita anche il feedback: senza cancellazione d'eco il tuo VOX non può
-  "rispondere" all'altoparlante, perché il canale è occupato.
+- **Più voci insieme**: fino a 4 persone possono parlare in contemporanea. Il server
+  mette in testa a ogni pacchetto audio l'id di chi parla; ogni pagina ha 4 lettori
+  `<audio>` (creati all'ingresso, così l'autoplay è sbloccato anche in background) e
+  assegna a ogni voce un lettore libero. Android li mixa sul canale Musica. La quinta
+  persona riceve "Canale pieno".
+- **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante.
+  Per questo, se non hai attivato "Uso le cuffie", mentre parli il volume degli altri
+  scende al 20% e il VOX non scatta mentre parlano gli altri (in vivavoce il VOX resta
+  quindi a turni; il PTT no). Con le cuffie tutto è libero.
 - **Microfono solo con pagina visibile**: su `visibilitychange` → `hidden` tutte le
   tracce vengono fermate (`track.stop()`), l'indicatore microfono di Android si spegne.
   L'`<audio>` continua a suonare in background.
