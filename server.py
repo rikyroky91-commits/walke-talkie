@@ -57,11 +57,13 @@ class Client:
 class Tx:
     """Una trasmissione in corso."""
 
-    def __init__(self, listeners: set[Client]):
+    def __init__(self, listeners: set[Client], call: bool):
         now = time.monotonic()
         # Solo chi è presente all'inizio riceve: lo stream webm ha l'header
-        # nel primo chunk, chi entra a metà aspetta la trasmissione successiva.
+        # nel primo chunk, chi entra a metà aspetta la trasmissione successiva
+        # (in modalità chiamata il server chiede a chi parla di ripartire).
         self.listeners = listeners
+        self.call = call          # microfono aperto: nessun limite di durata
         self.started = now
         self.last_audio = now
 
@@ -144,6 +146,12 @@ async def handle_json(client: Client, msg: dict):
             "maxSpeakers": MAX_SPEAKERS,
         })
         await broadcast(channel, {"t": "users", "users": channel.users()}, exclude=client)
+        # Le chiamate aperte non finiscono mai da sole: chi parla riparte con un nuovo
+        # stream (nuovo header webm) così anche il nuovo arrivato lo sente.
+        await asyncio.gather(*(
+            send_json(speaker, {"t": "resync"})
+            for speaker, tx in channel.speakers.items() if tx.call and speaker is not client
+        ))
         return
 
     channel = client.channel
@@ -154,7 +162,7 @@ async def handle_json(client: Client, msg: dict):
         if client not in channel.speakers and len(channel.speakers) >= MAX_SPEAKERS:
             await send_json(client, {"t": "floor_denied", "by": channel.talking()})
             return
-        channel.speakers[client] = Tx({c for c in channel.clients if c is not client})
+        channel.speakers[client] = Tx({c for c in channel.clients if c is not client}, msg.get("mode") == "call")
         log.info("[%s] %s parla (%d voci)", channel.name, client.name, len(channel.speakers))
         await send_json(client, {"t": "floor_granted"})
         await broadcast(channel, {"t": "talk_start", **client.info()}, exclude=client)
@@ -230,7 +238,7 @@ async def tx_watchdog(app: web.Application):
             for speaker, tx in list(channel.speakers.items()):
                 if now - tx.last_audio > SILENT_TX_TIMEOUT:
                     await end_tx(channel, speaker, "timeout")
-                elif now - tx.started > MAX_TX_SECONDS:
+                elif not tx.call and now - tx.started > MAX_TX_SECONDS:
                     await send_json(speaker, {"t": "tx_limit"})
                     await end_tx(channel, speaker, "limit")
 

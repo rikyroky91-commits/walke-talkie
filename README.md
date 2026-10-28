@@ -19,6 +19,13 @@ vede come una chiamata, l'audio esce sul canale **Musica** e il telefono resta l
   `<audio>` (creati all'ingresso, così l'autoplay è sbloccato anche in background) e
   assegna a ogni voce un lettore libero. Android li mixa sul canale Musica. La quinta
   persona riceve "Canale pieno".
+- **Due modalità**: 📻 *Radio* (tieni premuto per parlare, o VOX) e 📞 *Chiamata*
+  (microfono sempre aperto finché la pagina è in primo piano, il tasto silenzia).
+  In Chiamata ogni trasmissione è uno stream webm senza fine: quando entra qualcuno il
+  server manda `resync` a chi è in chiamata, che riparte con uno stream nuovo così il
+  nuovo arrivato riceve l'header. Le chiamate non hanno il limite dei 120 s.
+- **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
+  ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
 - **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante, quindi
   in vivavoce chi parla insieme a te può sentire un'eco della propria voce. Rimedi, nelle
   Impostazioni: "Abbassa gli altri mentre parlo" (spento di default: mentre tieni premuto

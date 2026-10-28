@@ -41,6 +41,12 @@
       </div>
     </header>
 
+    <div class="mode" role="group" aria-label="Modalità">
+      <button type="button" id="modeRadio" class="seg">📻 Radio</button>
+      <button type="button" id="modeCall" class="seg">📞 Chiamata</button>
+    </div>
+    <p id="callHint" class="hint" hidden>Microfono sempre aperto finché la pagina è in primo piano. In vivavoce senza cuffie ognuno sente l'eco della propria voce: usate le cuffie.</p>
+
     <div id="status" class="status">Connessione…</div>
 
     <button id="ptt" class="ptt" aria-label="Tieni premuto per parlare">
@@ -49,7 +55,7 @@
     </button>
 
     <div class="row">
-      <label class="switch">
+      <label id="voxRow" class="switch">
         <input type="checkbox" id="vox">
         <span>VOX (attivazione vocale)</span>
       </label>
@@ -79,7 +85,13 @@
         <span>Mantieni attivo in background</span>
       </label>
       <p class="hint">Quando passi a un'altra app il microfono si chiude da solo, ma continui a sentire i colleghi dall'altoparlante (canale Musica, non chiamata).</p>
+      <label class="switch">
+        <input type="checkbox" id="diag">
+        <span>Mostra diagnostica</span>
+      </label>
     </details>
+
+    <pre id="diagOut" class="diag" hidden></pre>
 
     <h2>Nel canale <span id="userCount"></span></h2>
     <ul id="users" class="users"></ul>

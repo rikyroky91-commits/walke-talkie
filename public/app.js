@@ -40,6 +40,8 @@ const el = {
   duck: $('#duck'), headphones: $('#headphones'), keepAlive: $('#keepAlive'),
   users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
   players: $('#players'), ka: $('#ka'), toast: $('#toast'),
+  modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
+  diag: $('#diag'), diagOut: $('#diagOut'),
 };
 
 const state = {
@@ -50,7 +52,10 @@ const state = {
   myId: null,
   channel: '',
   users: [],
-  talkers: new Map(), // id -> {name, player, rx}: chi sta parlando (escluso me)
+  mode: 'radio',      // 'radio' = tieni premuto, 'call' = microfono sempre aperto
+  callMuted: false,
+  callRetryAt: 0,
+  talkers: new Map(), // id -> {name, player, rx, bytes}: chi sta parlando (escluso me)
   rxEndedAt: 0,
   stream: null,
   micOpening: null,
@@ -204,7 +209,7 @@ function releasePlayer(p) {
 
 function applyVolume() {
   const tx = state.tx;
-  const duck = el.duck.checked && tx && tx.granted && !tx.stopped;
+  const duck = el.duck.checked && tx && tx.source !== 'call' && tx.granted && !tx.stopped;
   const v = Number(el.volume.value) * (duck ? DUCK_VOLUME : 1);
   players.forEach((p) => { p.audio.volume = v; });
 }
@@ -274,6 +279,7 @@ function openMic() {
     }
     state.stream = s;
     attachAnalyser();
+    ensureCall();
     render();
     return s;
   }).catch((e) => {
@@ -330,15 +336,25 @@ function startTx(source) {
     tx.stopped = true;
     if (tx.granted) send({ t: 'ptt_stop' });
     if (state.tx === tx) state.tx = null;
+    ensureCall();
     render();
   };
 
   // Registra subito (per non perdere la prima sillaba) e invia appena il server dà il via.
-  send({ t: 'ptt_start' });
+  send({ t: 'ptt_start', mode: source === 'call' ? 'call' : 'ptt' });
   rec.start(TIMESLICE);
-  vibrate(25);
+  if (source !== 'call') vibrate(25);
   render();
 }
+
+// Modalità chiamata: finché la pagina è visibile e il mic non è silenziato si trasmette
+// sempre. Riparte da sola dopo un resync, una riconnessione o il ritorno in primo piano.
+function ensureCall() {
+  if (state.mode !== 'call' || state.callMuted || state.tx || !state.joined || !state.connected
+    || !state.stream || document.hidden || Date.now() < state.callRetryAt) return;
+  startTx('call');
+}
+setInterval(ensureCall, 500);
 
 function stopTx() {
   const tx = state.tx;
@@ -362,6 +378,11 @@ function onFloorDenied() {
   if (!tx) return;
   tx.denied = true;
   tx.pending = [];
+  if (tx.source === 'call') {
+    // Canale pieno: riprova tra qualche secondo senza tempestare di avvisi.
+    state.callRetryAt = Date.now() + 5000;
+    state.busyUntil = state.callRetryAt;
+  }
   if (tx.rec.state !== 'inactive') tx.rec.stop();
   if (tx.source === 'ptt') busy();
 }
@@ -402,7 +423,7 @@ function detachAnalyser() {
 const voxBuf = new Float32Array(1024);
 function voxTick() {
   const an = state.analyser;
-  if (!state.vox || !an) {
+  if (!state.vox || !an || state.mode === 'call') {
     el.meterBar.style.width = '0';
     return;
   }
@@ -439,7 +460,9 @@ function clearTalkers() {
 function onAudio(buf) {
   const id = String.fromCharCode(...new Uint8Array(buf, 0, ID_LEN));
   const t = state.talkers.get(id);
-  if (t?.rx) t.player.push(buf.slice(ID_LEN));
+  if (!t) return;
+  t.bytes = (t.bytes || 0) + buf.byteLength;
+  if (t.rx) t.player.push(buf.slice(ID_LEN));
 }
 
 function connect() {
@@ -471,6 +494,7 @@ function connect() {
         el.chName.textContent = m.channel;
         history.replaceState(null, '', '?c=' + encodeURIComponent(m.channel));
         setupMediaSession();
+        ensureCall();
         break;
       case 'users':
         state.users = m.users;
@@ -505,6 +529,10 @@ function connect() {
         break;
       case 'floor_denied':
         onFloorDenied();
+        break;
+      case 'resync':
+        // È entrato qualcuno: riparto con uno stream nuovo (onstop -> ensureCall) così sente anche me.
+        if (state.tx?.source === 'call' && state.tx.granted) stopTx();
         break;
       case 'tx_limit':
         toast('Trasmissione troppo lunga, chiusa automaticamente');
@@ -559,6 +587,13 @@ function render() {
   el.mic.textContent = state.stream ? '🎙 Mic attivo' : 'Mic chiuso';
   el.mic.className = 'pill ' + (state.stream ? 'ok' : '');
 
+  const call = state.mode === 'call';
+  el.modeRadio.classList.toggle('on', !call);
+  el.modeCall.classList.toggle('on', call);
+  el.callHint.hidden = !call;
+  el.voxRow.hidden = call;
+  el.voxPanel.hidden = call || !state.vox;
+
   const tx = state.tx;
   const names = talkerNames();
   const onAir = tx && tx.granted && !tx.stopped;
@@ -567,6 +602,20 @@ function render() {
   let label = 'Tieni premuto<br>per parlare';
   if (!state.connected) {
     status = 'Connessione…';
+  } else if (call) {
+    label = state.callMuted ? 'Tocca per<br>riattivare' : 'Tocca per<br>silenziare';
+    if (state.callMuted) {
+      status = '🔇 Microfono silenziato' + (names.length ? ' · parlano ' + names.join(', ') : '');
+      cls = 'busy';
+    } else if (onAir) {
+      status = '📞 In chiamata' + (names.length ? ' con ' + names.join(', ') : ' · nessun altro collegato');
+      cls = 'tx';
+    } else if (Date.now() < state.busyUntil) {
+      status = 'Canale pieno: riprovo…';
+      cls = 'busy';
+    } else {
+      status = state.stream ? 'Collegamento…' : 'Microfono chiuso';
+    }
   } else if (onAir) {
     status = 'IN ONDA' + (names.length ? ' · con ' + names.join(', ') : '');
     cls = 'tx';
@@ -675,9 +724,18 @@ el.joinForm.addEventListener('submit', (e) => {
 el.leave.addEventListener('click', leave);
 
 // PTT: tieni premuto (touch o mouse) oppure barra spaziatrice
+// In modalità chiamata lo stesso tasto silenzia / riattiva il microfono.
 let pttHeld = false;
 el.ptt.addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  if (state.mode === 'call') {
+    state.callMuted = !state.callMuted;
+    if (state.callMuted) stopTx();
+    else ensureCall();
+    vibrate(25);
+    render();
+    return;
+  }
   el.ptt.setPointerCapture(e.pointerId);
   pttHeld = true;
   startTx('ptt');
@@ -691,13 +749,59 @@ const pttRelease = () => {
 el.ptt.addEventListener('contextmenu', (e) => e.preventDefault());
 
 document.addEventListener('keydown', (e) => {
-  if (e.code !== 'Space' || e.repeat || !state.joined || e.target.matches('input, textarea')) return;
+  if (e.code !== 'Space' || e.repeat || !state.joined || state.mode === 'call'
+    || e.target.matches('input, textarea, button')) return;
   e.preventDefault();
   pttHeld = true;
   startTx('ptt');
 });
 document.addEventListener('keyup', (e) => {
   if (e.code === 'Space') pttRelease();
+});
+
+function setMode(mode) {
+  if (state.mode === mode) return;
+  state.mode = mode;
+  store('mode', mode);
+  state.callMuted = false;
+  state.callRetryAt = 0;
+  if (state.tx) stopTx();  // onstop -> ensureCall riparte in modalità chiamata
+  ensureCall();
+  render();
+}
+el.modeRadio.addEventListener('click', () => setMode('radio'));
+el.modeCall.addEventListener('click', () => setMode('call'));
+
+// Diagnostica: cosa sta facendo ogni lettore, per capire i problemi sui telefoni.
+let diagLast = performance.now();
+setInterval(() => {
+  if (!el.diag.checked || !state.joined) return;
+  const now = performance.now();
+  const secs = (now - diagLast) / 1000;
+  diagLast = now;
+  const track = state.stream?.getAudioTracks()[0];
+  const tx = state.tx;
+  const lines = [
+    `modo ${state.mode}${state.callMuted ? ' (muto)' : ''} · ws ${state.connected ? 'ok' : 'giù'} · visibile ${!document.hidden}`,
+    `mic ${track ? track.readyState + (track.muted ? ' MUTED' : '') + ' ' + JSON.stringify(track.getSettings().echoCancellation) : 'chiuso'}`
+      + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ' ' + tx.source + ' rec=' + tx.rec.state : '-'}`,
+  ];
+  state.talkers.forEach((t, id) => {
+    const kbps = Math.round(((t.bytes || 0) * 8) / 1000 / secs);
+    t.bytes = 0;
+    lines.push(`voce ${t.name}: ${t.rx ? 'ricevo' : 'in attesa'} ${kbps} kbit/s · lettore ${t.player ? players.indexOf(t.player) : '-'}`);
+  });
+  players.forEach((p, i) => {
+    const a = p.audio;
+    lines.push(`#${i} ${p.owner ? state.talkers.get(p.owner)?.name ?? '?' : 'libero'} ${a.paused ? 'PAUSA' : 'play'} rs=${a.readyState}`
+      + ` t=${a.currentTime.toFixed(1)} lag=${Math.round(p.lag() * 1000)} vol=${a.volume} x${a.playbackRate}`
+      + ` ms=${p.ms.readyState}${a.error ? ' ERR ' + a.error.message : ''}`);
+  });
+  el.diagOut.textContent = lines.join('\n');
+}, 1000);
+el.diag.addEventListener('change', () => {
+  el.diagOut.hidden = !el.diag.checked;
+  store('diag', el.diag.checked ? '1' : '0');
 });
 
 el.vox.addEventListener('change', async () => {
@@ -739,6 +843,9 @@ el.keepAlive.addEventListener('change', () => {
   el.name.value = load('name') || '';
   el.channel.value = params.get('c') || load('channel') || '';
   el.voxThr.value = load('voxThr') || el.voxThr.value;
+  state.mode = load('mode') === 'call' ? 'call' : 'radio';
+  el.diag.checked = load('diag') === '1';
+  el.diagOut.hidden = !el.diag.checked;
   el.duck.checked = load('duck') === '1';
   el.headphones.checked = load('headphones') === '1';
   el.keepAlive.checked = load('keepAlive') !== '0';
