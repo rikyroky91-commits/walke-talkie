@@ -1,0 +1,2 @@
+aiohttp>=3.10
+cryptography>=42   # solo per --https (certificato self-signed)

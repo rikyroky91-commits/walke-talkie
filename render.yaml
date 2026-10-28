@@ -1,0 +1,16 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: walkie-talkie
+    runtime: python
+    region: frankfurt          # il più vicino all'Italia
+    plan: free                 # "starter" ($7/mese) per restare sempre acceso
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py   # Render passa la porta in $PORT e fornisce l'HTTPS
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ACCESS_CODE       # codice da dare ai colleghi, chiesto alla creazione
+        sync: false

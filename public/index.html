@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111418">
+  <title>Walkie-Talkie</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Schermata di accesso -->
+  <section id="join" class="screen">
+    <h1>📻 Walkie-Talkie</h1>
+    <p class="sub">Radio tra colleghi via WebSocket — niente chiamate, il telefono resta libero.</p>
+    <form id="joinForm" autocomplete="on">
+      <label>Il tuo nome
+        <input id="name" name="name" maxlength="32" required placeholder="Mario">
+      </label>
+      <label>Canale
+        <input id="channel" name="channel" maxlength="32" required placeholder="magazzino">
+      </label>
+      <label>Codice di accesso <small>(se richiesto)</small>
+        <input id="code" name="code" type="password" maxlength="64" autocomplete="off">
+      </label>
+      <button type="submit" class="primary">Entra nel canale</button>
+      <p id="joinError" class="error" hidden></p>
+    </form>
+    <p id="compat" class="warn" hidden></p>
+  </section>
+
+  <!-- Schermata radio -->
+  <section id="radio" class="screen" hidden>
+    <header>
+      <div>
+        <div class="ch-label">Canale</div>
+        <div id="chName" class="ch-name">—</div>
+      </div>
+      <div class="hdr-right">
+        <span id="conn" class="pill">…</span>
+        <button id="leave" class="ghost">Esci</button>
+      </div>
+    </header>
+
+    <div id="status" class="status">Connessione…</div>
+
+    <button id="ptt" class="ptt" aria-label="Tieni premuto per parlare">
+      <span class="ptt-icon">🎙</span>
+      <span id="pttLabel" class="ptt-label">Tieni premuto<br>per parlare</span>
+    </button>
+
+    <div class="row">
+      <label class="switch">
+        <input type="checkbox" id="vox">
+        <span>VOX (attivazione vocale)</span>
+      </label>
+      <span id="mic" class="pill">Mic chiuso</span>
+    </div>
+
+    <div id="voxPanel" class="vox-panel" hidden>
+      <div class="meter"><div id="meterBar"></div><div id="meterThr"></div></div>
+      <label>Soglia VOX <input id="voxThr" type="range" min="-70" max="-10" step="1" value="-42"> <span id="voxThrVal">-42 dB</span></label>
+    </div>
+
+    <details class="settings">
+      <summary>Impostazioni</summary>
+      <label>Volume <input id="volume" type="range" min="0" max="1" step="0.05" value="1"></label>
+      <label class="switch">
+        <input type="checkbox" id="keepAlive" checked>
+        <span>Mantieni attivo in background</span>
+      </label>
+      <p class="hint">Quando passi a un'altra app il microfono si chiude da solo, ma continui a sentire i colleghi dall'altoparlante (canale Musica, non chiamata).</p>
+    </details>
+
+    <h2>Nel canale <span id="userCount"></span></h2>
+    <ul id="users" class="users"></ul>
+
+    <footer><span id="rtt">RTT —</span> · <span id="lag">buffer —</span></footer>
+  </section>
+
+  <!-- Playback ricezione (MSE) + keep-alive -->
+  <audio id="rx" playsinline></audio>
+  <audio id="ka" playsinline loop></audio>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
