@@ -9,21 +9,27 @@ vede come una chiamata, l'audio esce sul canale **Musica** e il telefono resta l
 ```
  [Chi parla]                                   [Chi ascolta]
  getUserMedia (AEC/NS/AGC OFF)                 WebSocket (binaryType=arraybuffer)
-   └─ AudioWorklet, blocchi da 20 ms             └─ AudioDecoder opus (uno per voce)
+   └─ AudioWorklet, blocchi da 10 ms             └─ AudioDecoder opus (uno per voce)
         └─ AudioEncoder opus 32 kbit/s                └─ AudioWorklet: jitter buffer + mix
              └─ WebSocket ──► server.py ──► altri          └─ AudioContext → STREAM_MUSIC
-                  [id 8 byte | seq 2 byte | opus]
+                  [id 8 byte | istante 2 byte | opus]
 ```
 
-Come una telefonata: pacchetti opus da 20 ms (WebCodecs), ognuno indipendente, e un
+L'istante è il timestamp audio del pacchetto in unità da 10 ms: il ricevitore lo usa
+per misurare il jitter e funziona con qualsiasi durata di frame (10 ms, o 20 ms sui
+browser che non li supportano).
+
+Come una telefonata: pacchetti opus da 10 ms (WebCodecs), ognuno indipendente, e un
 jitter buffer adattivo nel thread audio. Niente MediaRecorder/MSE, che su Chrome
 richiedevano almeno 200 ms di buffer e si inceppavano sulla rete mobile.
 
 - **Più voci insieme**: fino a 4 persone possono parlare in contemporanea. Il server
   mette in testa a ogni pacchetto l'id di chi parla; la pagina ha un decoder per voce e
   il worklet di riproduzione le mixa. La quinta persona riceve "Canale pieno".
-- **Jitter buffer**: parte da 100 ms, sale di 40 ms a ogni interruzione (max 600 ms) e
-  scende di 10 ms ogni 8 s di rete stabile (min 60 ms). Il ritardo accumulato si
+- **Jitter buffer**: l'obiettivo è il 97° percentile del ritardo d'arrivo dei pacchetti
+  negli ultimi 10 s, più 10 ms (min 30, max 600 ms). Ogni interruzione aggiunge 20 ms di
+  margine che svanisce in meno di un secondo di audio. Così il buffer sale appena la rete
+  peggiora e torna giù entro ~10 s quando si calma. Il ritardo accumulato si
   recupera scartando i blocchi di silenzio tra le parole, non la voce. Il server, se un
   ascoltatore ha più di ~1 s in coda, gli salta qualche pacchetto invece di accumulare.
 - **Due modalità**: 📻 *Radio* (tieni premuto per parlare, o VOX) e 📞 *Chiamata*
@@ -98,15 +104,18 @@ acceso cambia `plan: free` in `plan: starter` ($7/mese) o modificalo dalla dashb
 
 ## Latenza misurata
 
-Test in locale (Chrome desktop, collega simulato che invia opus da 20 ms, 20 s per prova):
+Test in locale (Chrome desktop, collega simulato che invia opus da 10 ms, 15 s per prova,
+uscita audio del PC 50 ms):
 
 | Rete simulata | Buffer | Interruzioni | Ritardo stimato |
 |---|---|---|---|
-| jitter 0–60 ms | 80–100 ms | 0 | ~175 ms |
-| jitter 0–150 ms + blocchi da 400 ms ogni 5 s | 210–260 ms | 4 | ~280 ms |
+| jitter 0–30 ms | 41 ms | 0 | ~100 ms |
+| jitter 0–150 ms + blocchi da 400 ms ogni 5 s | ~300 ms | 3 | ~390 ms |
+| di nuovo 0–30 ms, dopo 14 s | 41–48 ms | 0 nuove | ~105 ms |
 
-Il ritardo stimato (in basso nella pagina) è frame 20 ms + metà RTT + jitter buffer +
-latenza d'uscita dell'audio. Su Internet aggiungi l'RTT verso il server: conviene una
+Il ritardo stimato (in basso nella pagina, scomposto nella diagnostica) è frame +
+metà RTT + jitter buffer + latenza d'uscita dell'audio; manca la latenza d'ingresso del
+microfono, che il browser non espone. Su Internet aggiungi l'RTT verso il server: conviene una
 regione vicina (Francoforte per l'Italia, non Oregon).
 
 L'AudioContext su Android esce come media (non come chiamata), purché non venga

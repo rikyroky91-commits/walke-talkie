@@ -3,30 +3,30 @@
 /*
  * Thread audio (AudioWorklet).
  *
- * wt-capture:  raccoglie il microfono in blocchi da 20 ms e li passa alla pagina,
+ * wt-capture:  raccoglie il microfono in blocchi da 10 ms e li passa alla pagina,
  *              che li codifica in opus (AudioEncoder) e li manda sul WebSocket.
  * wt-playback: un jitter buffer per ogni voce e il mix sull'uscita dell'AudioContext.
- *              Il buffer parte basso (100 ms), cresce a ogni interruzione e scende piano
- *              quando la rete è stabile. Il ritardo accumulato si recupera scartando i
- *              blocchi di silenzio (pause tra le parole), così la voce non si taglia.
+ *              L'obiettivo del buffer lo calcola la pagina dal jitter misurato sui
+ *              pacchetti (ultimi 10 s); qui si aggiunge solo un margine temporaneo dopo
+ *              ogni interruzione, che svanisce in pochi secondi. Il ritardo in eccesso si
+ *              recupera scartando i blocchi di silenzio (pause tra le parole).
  */
 
-const FRAME = sampleRate / 50;            // 20 ms
-const START_TARGET = 0.1 * sampleRate;
-const MIN_TARGET = 0.06 * sampleRate;
+const START_TARGET = 0.06 * sampleRate;   // finché la pagina non ha misurato il jitter
+const MIN_TARGET = 0.03 * sampleRate;
 const MAX_TARGET = 0.6 * sampleRate;
-const STEP = 0.04 * sampleRate;           // in più a ogni interruzione
-const DECAY_EVERY = 8 * sampleRate;       // 8 s senza interruzioni...
-const DECAY = 0.01 * sampleRate;          // ...e l'obiettivo scende di 10 ms
-const SOFT_SLACK = 0.04 * sampleRate;     // oltre obiettivo+40 ms si scartano i silenzi
-const HARD_SLACK = 0.3 * sampleRate;      // oltre obiettivo+300 ms si scarta comunque
+const BOOST_STEP = 0.02 * sampleRate;     // margine in più a ogni interruzione...
+const BOOST_DECAY = 0.03;                 // ...che scende di 30 ms per ogni secondo suonato
+const SOFT_SLACK = 0.02 * sampleRate;     // oltre obiettivo+20 ms si scartano i silenzi
+const HARD_SLACK = 0.2 * sampleRate;      // oltre obiettivo+200 ms si scarta comunque
 const QUIET = 0.01;                       // RMS sotto cui un blocco è "pausa" (-40 dBFS)
 
 class Capture extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
+    this.frame = options.processorOptions.frame;
     this.on = false;
-    this.buf = new Float32Array(FRAME);
+    this.buf = new Float32Array(this.frame);
     this.n = 0;
     this.port.onmessage = (e) => {
       this.on = e.data.on;
@@ -39,13 +39,13 @@ class Capture extends AudioWorkletProcessor {
     if (!this.on || !ch) return true;
     let i = 0;
     while (i < ch.length) {
-      const take = Math.min(ch.length - i, FRAME - this.n);
+      const take = Math.min(ch.length - i, this.frame - this.n);
       this.buf.set(ch.subarray(i, i + take), this.n);
       this.n += take;
       i += take;
-      if (this.n === FRAME) {
+      if (this.n === this.frame) {
         this.port.postMessage(this.buf, [this.buf.buffer]);
-        this.buf = new Float32Array(FRAME);
+        this.buf = new Float32Array(this.frame);
         this.n = 0;
       }
     }
@@ -54,16 +54,20 @@ class Capture extends AudioWorkletProcessor {
 }
 
 class Voice {
-  constructor(target) {
+  constructor(net) {
     this.chunks = [];
     this.pos = 0;           // posizione nel primo chunk
     this.buffered = 0;      // campioni in coda
     this.playing = false;   // false = sta riempiendo il buffer fino all'obiettivo
     this.ending = false;    // la trasmissione è finita: suona quello che resta e basta
-    this.target = target;
-    this.played = 0;        // campioni suonati dall'ultima modifica dell'obiettivo
+    this.net = net;         // obiettivo dal jitter misurato
+    this.boost = 0;         // margine temporaneo dopo un'interruzione
     this.underruns = 0;
     this.dropped = 0;
+  }
+
+  get target() {
+    return Math.min(MAX_TARGET, Math.max(MIN_TARGET, this.net + this.boost));
   }
 
   push(pcm) {
@@ -71,7 +75,7 @@ class Voice {
     this.buffered += pcm.length;
   }
 
-  // Copia (sommando) fino a out.length campioni in out; con out null li scarta.
+  // Somma fino a n campioni in out; con out null li scarta.
   read(out, gain, n) {
     let i = 0;
     while (i < n && this.chunks.length) {
@@ -103,33 +107,40 @@ class Playback extends AudioWorkletProcessor {
   constructor() {
     super();
     this.voices = new Map();
-    this.learned = new Map();   // obiettivo imparato per ogni voce, tra una trasmissione e l'altra
+    this.learned = new Map();   // obiettivo per ogni voce, tra una trasmissione e l'altra
     this.gain = 1;
     this.sinceStats = 0;
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
 
+  voice(id) {
+    let v = this.voices.get(id);
+    if (!v) {
+      v = new Voice(this.learned.get(id) || START_TARGET);
+      this.voices.set(id, v);
+    }
+    return v;
+  }
+
   onMessage(m) {
     switch (m.t) {
-      case 'pcm': {
-        let v = this.voices.get(m.id);
-        if (!v) {
-          v = new Voice(this.learned.get(m.id) || START_TARGET);
-          this.voices.set(m.id, v);
-        }
-        v.push(m.pcm);
+      case 'pcm':
+        this.voice(m.id).push(m.pcm);
         break;
-      }
-      case 'start': {
+      case 'start':
         // Se la trasmissione precedente sta ancora suonando la nuova si accoda, senza tagli.
-        const v = this.voices.get(m.id);
-        if (v) v.ending = false;
-        else this.voices.set(m.id, new Voice(this.learned.get(m.id) || START_TARGET));
+        this.voice(m.id).ending = false;
         break;
-      }
       case 'end': {
         const v = this.voices.get(m.id);
         if (v) v.ending = true;
+        break;
+      }
+      case 'target': {
+        const net = m.value * sampleRate;
+        const v = this.voices.get(m.id);
+        if (v) v.net = net;
+        this.learned.set(m.id, net);
         break;
       }
       case 'reset':
@@ -154,24 +165,21 @@ class Playback extends AudioWorkletProcessor {
         }
       }
       // Recupero del ritardo: prima le pause, oltre una certa soglia qualsiasi blocco.
-      while (v.buffered > v.target + HARD_SLACK + n) v.dropped += v.read(null, 0, n);
-      if (v.buffered > v.target + SOFT_SLACK + n && v.quietAhead(n)) v.dropped += v.read(null, 0, n);
+      const target = v.target;
+      while (v.buffered > target + HARD_SLACK + n) v.dropped += v.read(null, 0, n);
+      if (v.buffered > target + SOFT_SLACK + n && v.quietAhead(n)) v.dropped += v.read(null, 0, n);
 
       const got = v.read(out, this.gain, n);
-      v.played += got;
+      v.boost = Math.max(0, v.boost - got * BOOST_DECAY);
       if (got < n) {
         v.playing = false;
         if (v.ending) {
           this.forget(id, v);
           continue;
         }
-        // Buffer finito a metà voce: interruzione udibile, serve più margine.
+        // Buffer finito a metà voce: interruzione udibile, più margine per un po'.
         v.underruns++;
-        v.target = Math.min(MAX_TARGET, v.target + STEP);
-        v.played = 0;
-      } else if (v.played > DECAY_EVERY) {
-        v.played = 0;
-        v.target = Math.max(MIN_TARGET, v.target - DECAY);
+        v.boost += BOOST_STEP;
       }
     }
     for (let k = 0; k < n; k++) out[k] = Math.max(-1, Math.min(1, out[k]));
@@ -195,7 +203,7 @@ class Playback extends AudioWorkletProcessor {
   }
 
   forget(id, v) {
-    this.learned.set(id, v.target);
+    this.learned.set(id, v.net);
     this.voices.delete(id);
   }
 }

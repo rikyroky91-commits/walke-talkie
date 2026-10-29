@@ -3,23 +3,30 @@
 /*
  * Walkie-Talkie su WebSocket — zero WebRTC.
  *
- * Invio:     getUserMedia (filtri VoIP spenti) -> AudioWorklet (blocchi da 20 ms)
- *            -> AudioEncoder opus -> WebSocket, un pacchetto ogni 20 ms [seq 2 byte | opus].
- * Ricezione: WebSocket -> [id 8 byte | seq | opus] -> AudioDecoder (uno per voce)
- *            -> AudioWorklet con jitter buffer adattivo e mix -> uscita dell'AudioContext.
+ * Invio:     getUserMedia (filtri VoIP spenti) -> AudioWorklet (blocchi da 10 ms)
+ *            -> AudioEncoder opus -> WebSocket, un pacchetto ogni 10 ms
+ *            [istante audio in unità da 10 ms, 2 byte | opus].
+ * Ricezione: WebSocket -> [id 8 byte | istante | opus] -> AudioDecoder (uno per voce)
+ *            -> AudioWorklet con jitter buffer e mix -> uscita dell'AudioContext.
+ *            L'obiettivo del buffer è il jitter misurato sugli arrivi degli ultimi 10 s.
  *            Su Android l'AudioContext esce sul canale media (STREAM_MUSIC), non come chiamata.
  * Mic:       aperto solo con la pagina visibile, salvo le opzioni della modalità Chiamata.
  */
 
 const SAMPLE_RATE = 48000;
+const FRAME_MS = 10;          // durata di un pacchetto: meno attesa prima di partire
+const UNIT_US = 10000;        // l'istante nel pacchetto è in unità da 10 ms
 const BITRATE = 32000;        // bps opus mono, ottimo per la voce
+const JIT_WINDOW_MS = 10000;  // finestra su cui si misura il jitter
+const JIT_PERCENTILE = 0.97;  // il buffer copre il 97% dei ritardi d'arrivo...
+const JIT_MARGIN = 0.01;      // ...più 10 ms
 const ENC_BACKLOG = 8 * 1024; // byte in uscita oltre cui si scartano pacchetti (meglio un buco che il ritardo)
 const MAX_VOICES = 4;         // voci contemporanee (uguale a MAX_SPEAKERS del server)
 const DUCK_VOLUME = 0.2;      // volume degli altri mentre parli, se "Abbassa gli altri" è attivo
 const VOX_HANG_MS = 900;      // la trasmissione VOX resta aperta dopo l'ultima voce
 const VOX_RX_GUARD_MS = 600;  // niente VOX subito dopo una ricezione (coda dell'altoparlante)
 const ID_LEN = 8;             // byte di id di chi parla in testa a ogni pacchetto
-const HDR_LEN = ID_LEN + 2;   // id + numero di sequenza
+const HDR_LEN = ID_LEN + 2;   // id + istante audio
 const DEC_CONFIG = { codec: 'opus', sampleRate: SAMPLE_RATE, numberOfChannels: 1 };
 const SUPPORTED = !!(window.AudioEncoder && window.AudioDecoder && window.AudioWorkletNode);
 
@@ -91,7 +98,10 @@ function setupAudio() {
   state.audioReady = Promise.all([ac.audioWorklet.addModule('audio-worklet.js'), pickEncoderConfig(ac.sampleRate)])
     .then(([, cfg]) => {
       state.encConfig = cfg;
-      state.capture = new AudioWorkletNode(ac, 'wt-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      state.capture = new AudioWorkletNode(ac, 'wt-capture', {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+        processorOptions: { frame: Math.round(ac.sampleRate * FRAME_MS / 1000) },
+      });
       state.capture.port.onmessage = (e) => onMicFrame(e.data);
       state.capture.connect(ac.destination);  // esce solo silenzio: serve perché il nodo venga elaborato
       state.playback = new AudioWorkletNode(ac, 'wt-playback', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
@@ -111,11 +121,13 @@ function setupAudio() {
   return state.audioReady;
 }
 
-// Opus a frame da 20 ms. Le opzioni opus avanzate non ci sono su tutti i Chrome.
+// Opus a frame da 10 ms (20 ms se il browser non li fa). Le opzioni opus avanzate
+// non ci sono su tutti i Chrome. Il ricevitore si regola sull'istante nel pacchetto,
+// quindi la durata dei frame può cambiare senza problemi.
 async function pickEncoderConfig(sampleRate) {
   const base = { codec: 'opus', sampleRate, numberOfChannels: 1, bitrate: BITRATE };
-  const full = { ...base, opus: { frameDuration: 20000, complexity: 5, application: 'voip', signal: 'voice' } };
-  for (const cfg of [full, { ...base, opus: { frameDuration: 20000 } }, base]) {
+  const opus = (frameDuration) => ({ ...base, opus: { frameDuration, complexity: 5, application: 'voip', signal: 'voice' } });
+  for (const cfg of [opus(FRAME_MS * 1000), { ...base, opus: { frameDuration: FRAME_MS * 1000 } }, opus(20000), base]) {
     try {
       if ((await AudioEncoder.isConfigSupported(cfg)).supported) return cfg;
     } catch { /* prova la successiva */ }
@@ -150,11 +162,12 @@ function makeDecoder(id) {
 function startVoice(id, name) {
   let t = state.talkers.get(id);
   if (!t) {
-    t = { name, dec: null, ts: 0, seq: -1, bytes: 0, lost: 0 };
+    t = { name, dec: null, seq: -1, unit: 0, step: 0, arrivals: [], bytes: 0, lost: 0 };
     state.talkers.set(id, t);
   }
   t.name = name || t.name;
   t.seq = -1;
+  t.arrivals = [];
   state.playback?.port.postMessage({ t: 'start', id });
 }
 
@@ -182,17 +195,43 @@ function onAudio(buf) {
   const id = String.fromCharCode(...new Uint8Array(buf, 0, ID_LEN));
   const t = state.talkers.get(id);
   if (!t) return;
+  const now = performance.now();
   const seq = new DataView(buf).getUint16(ID_LEN);
   if (t.seq >= 0) {
-    const gap = (seq - t.seq - 1) & 0xffff;
-    if (gap && gap < 1000) t.lost += gap;  // pacchetti scartati dal server per rete lenta
+    const diff = (seq - t.seq) & 0xffff;
+    if (diff === 0 || diff > 0x8000) return;  // doppione o fuori ordine: non succede su TCP
+    if (!t.step || diff < t.step) t.step = diff;
+    if (diff > t.step) t.lost += Math.round(diff / t.step) - 1;  // scartati dal server per rete lenta
+    t.unit += diff;
+  } else {
+    t.unit = 0;
   }
   t.seq = seq;
   t.bytes += buf.byteLength;
+  // Quanto in ritardo arriva il pacchetto rispetto al suo istante audio (a meno di una costante).
+  t.arrivals.push(now, now - t.unit * UNIT_US / 1000);
   if (!t.dec || t.dec.state === 'closed') t.dec = makeDecoder(id);
-  t.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: t.ts, data: new Uint8Array(buf, HDR_LEN) }));
-  t.ts += 20000;
+  t.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: t.unit * UNIT_US, data: new Uint8Array(buf, HDR_LEN) }));
 }
+
+// Obiettivo del buffer = jitter d'arrivo degli ultimi 10 s (97° percentile) + margine.
+// Scende da solo appena la rete si calma, invece di restare alto per minuti.
+function updateJitterTargets() {
+  const now = performance.now();
+  state.talkers.forEach((t, id) => {
+    const a = t.arrivals;
+    let k = 0;
+    while (k < a.length && a[k] < now - JIT_WINDOW_MS) k += 2;
+    if (k) a.splice(0, k);
+    if (a.length < 40) return;
+    const delays = [];
+    for (let i = 1; i < a.length; i += 2) delays.push(a[i]);
+    delays.sort((x, y) => x - y);
+    t.jitter = (delays[Math.floor((delays.length - 1) * JIT_PERCENTILE)] - delays[0]) / 1000;
+    state.playback?.port.postMessage({ t: 'target', id, value: t.jitter + JIT_MARGIN });
+  });
+}
+setInterval(updateJitterTargets, 500);
 
 /* ------------------------------------------------------------- Keep-alive */
 
@@ -437,14 +476,14 @@ function startTx(source) {
     return;
   }
 
-  const tx = { source, granted: false, denied: false, stopped: false, stopSent: false, pending: [], seq: 0, ts: 0, enc: null, sent: 0, dropped: 0 };
+  const tx = { source, granted: false, denied: false, stopped: false, stopSent: false, pending: [], ts: 0, enc: null, sent: 0, dropped: 0 };
   tx.enc = new AudioEncoder({
     output: (chunk) => {
       if (tx.denied) return;
+      const unit = Math.round(chunk.timestamp / UNIT_US) & 0xffff;
       const pkt = new Uint8Array(2 + chunk.byteLength);
-      pkt[0] = (tx.seq >> 8) & 0xff;
-      pkt[1] = tx.seq & 0xff;
-      tx.seq = (tx.seq + 1) & 0xffff;
+      pkt[0] = unit >> 8;
+      pkt[1] = unit & 0xff;
       chunk.copyTo(pkt.subarray(2));
       if (tx.granted) sendAudio(tx, pkt);
       else tx.pending.push(pkt);
@@ -702,18 +741,25 @@ function connect() {
 
 setInterval(() => send({ t: 'ping', ts: performance.now() }), 3000);
 
-// Ritardo bocca-orecchio stimato: frame + metà RTT + jitter buffer + uscita audio.
-function estimatedDelay() {
+// Ritardo bocca-orecchio stimato, in ms, scomposto: pacchetto + rete (metà RTT) +
+// jitter buffer + uscita audio. Manca la latenza d'ingresso del microfono (non misurabile).
+function delayParts() {
   const bufs = Object.values(state.pbStats).map((v) => v.buf);
   if (!bufs.length) return null;
-  const out = (state.ac?.outputLatency || 0) + (state.ac?.baseLatency || 0);
-  return 0.02 + state.rtt / 2000 + Math.max(...bufs) + out;
+  const parts = {
+    pacchetto: (state.encConfig?.opus?.frameDuration || 20000) / 1000,
+    rete: state.rtt / 2,
+    buffer: Math.max(...bufs) * 1000,
+    uscita: ((state.ac?.outputLatency || 0) + (state.ac?.baseLatency || 0)) * 1000,
+  };
+  parts.totale = Object.values(parts).reduce((x, y) => x + y, 0);
+  return parts;
 }
 
 setInterval(() => {
   if (!state.joined) return;
-  const d = estimatedDelay();
-  el.lag.textContent = d === null ? 'ritardo —' : 'ritardo ~' + Math.round(d * 1000) + ' ms';
+  const d = delayParts();
+  el.lag.textContent = d === null ? 'ritardo —' : 'ritardo ~' + Math.round(d.totale) + ' ms';
 }, 500);
 
 /* --------------------------------------------------------------------- UI */
@@ -964,10 +1010,12 @@ setInterval(() => {
   if (tx) tx.sent = 0;
   state.talkers.forEach((t, id) => {
     const pb = state.pbStats[id];
-    lines.push(`voce ${t.name}: ${kbps(t.bytes)} kbit/s · persi ${t.lost}`
+    lines.push(`voce ${t.name}: ${kbps(t.bytes)} kbit/s · persi ${t.lost} · jitter ${t.jitter === undefined ? '?' : Math.round(t.jitter * 1000)} ms`
       + (pb ? ` · buffer ${Math.round(pb.buf * 1000)}/${Math.round(pb.target * 1000)} ms · interruzioni ${pb.underruns} · recuperati ${pb.dropped.toFixed(1)} s` : ''));
     t.bytes = 0;
   });
+  const d = delayParts();
+  if (d) lines.push('ritardo ' + Object.entries(d).map(([k, v]) => `${k} ${Math.round(v)}`).join(' · ') + ' ms');
   lines.push('— eventi —', ...events);
   el.diagOut.textContent = lines.join('\n');
 }, 1000);
