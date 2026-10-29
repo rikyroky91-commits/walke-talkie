@@ -45,7 +45,11 @@ richiedevano almeno 200 ms di buffer e si inceppavano sulla rete mobile.
   intero con sotto un video invisibile (webm registrato da un canvas) che la copre. Chrome
   Android, se premi Home mentre un video è a schermo intero, si riduce da solo in
   Picture-in-Picture: resta visibile e quindi conserva il microfono. Ogni tocco sulla
-  pagina richiede di nuovo lo schermo intero (serve un gesto).
+  pagina richiede di nuovo lo schermo intero (serve un gesto). Il PiP all'uscita è una
+  funzione di Chrome: sugli altri browser Android (Xiaomi, Samsung Internet, Firefox,
+  Opera…) la pagina mostra "Apri in Chrome" (link `intent://` con
+  `package=com.android.chrome`) e, se il browser ha l'API Picture-in-Picture, un tasto
+  per aprire la finestrella a mano.
 - **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
   ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
 - **Niente cancellazione d'eco**: con `echoCancellation: true` Chrome Android apre il

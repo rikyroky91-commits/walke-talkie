@@ -138,6 +138,20 @@ header { display: flex; justify-content: space-between; align-items: center; }
 
 .call-opts { display: flex; flex-direction: column; gap: 8px; }
 
+.browser-warn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--busy) 50%, transparent);
+  background: color-mix(in srgb, var(--busy) 12%, var(--panel));
+  color: var(--busy);
+  font-size: 14px;
+}
+.browser-warn p { margin: 0; }
+.browser-warn .primary { text-align: center; text-decoration: none; }
+
 .diag {
   margin: 0;
   padding: 10px;

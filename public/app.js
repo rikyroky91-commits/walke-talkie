@@ -44,6 +44,7 @@ const el = {
   modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
   diag: $('#diag'), diagOut: $('#diagOut'), bgMic: $('#bgMic'),
   pipAuto: $('#pipAuto'), pipVideo: $('#pipVideo'),
+  otherBrowser: $('#otherBrowser'), openChrome: $('#openChrome'), pipNow: $('#pipNow'),
 };
 
 const state = {
@@ -384,6 +385,48 @@ let pipClip = null;
 function pipWanted() {
   return state.joined && state.mode === 'call' && el.pipAuto.checked;
 }
+
+// Il PiP automatico all'uscita è una funzione di Chrome, non uno standard: il browser
+// Xiaomi, Samsung Internet, Firefox, Opera ecc. non lo fanno. Lì si offre di riaprire
+// la pagina in Chrome (link intent://, che ogni browser Android passa al sistema).
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const OTHER_BROWSERS = /MiuiBrowser|XiaoMi|SamsungBrowser|OPR\/|Opera|EdgA|Firefox|FxiOS|YaBrowser|UCBrowser|HuaweiBrowser|HeyTapBrowser|VivoBrowser|Brave|DuckDuckGo|; wv\)/i;
+function isChrome() {
+  const brands = navigator.userAgentData?.brands?.map((b) => b.brand) || [];
+  if (brands.length) return brands.includes('Google Chrome');
+  return /Chrome\//.test(navigator.userAgent) && !OTHER_BROWSERS.test(navigator.userAgent);
+}
+const NEEDS_CHROME = IS_ANDROID && !isChrome();
+
+function chromeIntentUrl() {
+  const fallback = 'https://play.google.com/store/apps/details?id=com.android.chrome';
+  return `intent://${location.host}${location.pathname}${location.search}#Intent;scheme=https;package=com.android.chrome;`
+    + `S.browser_fallback_url=${encodeURIComponent(fallback)};end`;
+}
+
+function renderBrowserWarn() {
+  el.otherBrowser.hidden = !(NEEDS_CHROME && state.mode === 'call');
+  el.openChrome.href = chromeIntentUrl();
+  // Se questo browser ha almeno l'API Picture-in-Picture, la finestrella si apre a mano.
+  el.pipNow.hidden = !document.pictureInPictureEnabled;
+}
+
+el.pipNow.addEventListener('click', async () => {
+  try {
+    await pipUpdate();
+    if (el.pipVideo.hidden) {
+      // L'opzione automatica è spenta: prepariamo il video solo per questa volta.
+      el.pipVideo.src = await makePipClip();
+      el.pipVideo.hidden = false;
+      await el.pipVideo.play();
+    }
+    await el.pipVideo.requestPictureInPicture();
+    logEvent('mini finestra aperta a mano');
+  } catch (e) {
+    logEvent('mini finestra non disponibile: ' + e.name);
+    toast('Questo browser non apre la finestrella: usa Chrome');
+  }
+});
 
 // Un webm vero (Blob URL) registrato da un canvas, non un MediaStream: è il caso
 // "video a schermo intero" che Chrome riconosce per il PiP automatico.
@@ -787,6 +830,7 @@ function render() {
   el.modeRadio.classList.toggle('on', !call);
   el.modeCall.classList.toggle('on', call);
   el.callHint.hidden = !call;
+  renderBrowserWarn();
   el.voxRow.hidden = call;
   el.voxPanel.hidden = call || !state.vox;
 
