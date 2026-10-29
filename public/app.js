@@ -38,7 +38,7 @@ const el = {
   ptt: $('#ptt'), pttLabel: $('#pttLabel'), vox: $('#vox'), mic: $('#mic'),
   voxPanel: $('#voxPanel'), meterBar: $('#meterBar'), meterThr: $('#meterThr'),
   voxThr: $('#voxThr'), voxThrVal: $('#voxThrVal'), volume: $('#volume'),
-  duck: $('#duck'), headphones: $('#headphones'), keepAlive: $('#keepAlive'), aec: $('#aec'),
+  duck: $('#duck'), headphones: $('#headphones'), keepAlive: $('#keepAlive'),
   users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
   ka: $('#ka'), toast: $('#toast'),
   modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
@@ -286,8 +286,9 @@ function openMic() {
   state.micOpening = navigator.mediaDevices.getUserMedia({
     audio: {
       // Filtri VoIP spenti: Chrome non chiede il profilo VOICE_COMMUNICATION all'HAL.
-      // La cancellazione d'eco è un'opzione (in vivavoce toglie l'eco agli altri).
-      echoCancellation: el.aec.checked,
+      // Con la cancellazione d'eco accesa Android passerebbe in modalità chiamata
+      // (e anche l'uscita audio diventerebbe "chiamata"): mai attivarla.
+      echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: false,
       channelCount: 1,
@@ -1058,14 +1059,6 @@ el.keepAlive.addEventListener('change', () => {
   store('keepAlive', el.keepAlive.checked ? '1' : '0');
   updateKeepAlive();
 });
-// La cancellazione d'eco si decide all'apertura del mic: lo riapriamo.
-el.aec.addEventListener('change', () => {
-  store('aec', el.aec.checked ? '1' : '0');
-  if (state.stream) {
-    closeMic();
-    openMic();
-  }
-});
 
 /* -------------------------------------------------------------------- Avvio */
 
@@ -1082,7 +1075,7 @@ el.aec.addEventListener('change', () => {
   el.duck.checked = load('duck') === '1';
   el.headphones.checked = load('headphones') === '1';
   el.keepAlive.checked = load('keepAlive') !== '0';
-  el.aec.checked = load('aec') === '1';
+  store('aec', '0');  // opzione tolta: chi l'aveva accesa torna senza
   showThr();
 
   const problems = [];

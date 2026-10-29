@@ -48,10 +48,12 @@ richiedevano almeno 200 ms di buffer e si inceppavano sulla rete mobile.
   pagina richiede di nuovo lo schermo intero (serve un gesto).
 - **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
   ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
+- **Niente cancellazione d'eco**: con `echoCancellation: true` Chrome Android apre il
+  microfono come VOICE_COMMUNICATION e mette il telefono in modalità chiamata (anche
+  l'uscita audio diventa "chiamata"). Per questo è sempre spenta.
 - **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante, quindi
   in vivavoce chi parla insieme a te può sentire un'eco della propria voce. Rimedi, nelle
-  Impostazioni: le cuffie, "Cancellazione eco" (`echoCancellation: true`: da verificare
-  che Android non passi in modalità chiamata), oppure "Abbassa gli altri mentre parlo"
+  Impostazioni: le cuffie oppure "Abbassa gli altri mentre parlo"
   (solo Radio: mentre tieni premuto gli altri scendono al 20%). Senza "Uso le cuffie" il VOX non scatta
   mentre parlano gli altri; il PTT funziona sempre in contemporanea.
 - **Microfono solo con pagina visibile**: su `visibilitychange` → `hidden` tutte le
