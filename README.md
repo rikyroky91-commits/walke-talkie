@@ -27,6 +27,13 @@ vede come una chiamata, l'audio esce sul canale **Musica** e il telefono resta l
 - **Microfono anche fuori dal browser** (opzione della modalità Chiamata, spenta di
   default): passando a un'altra app il microfono resta aperto e la trasmissione continua.
   Chrome Android mantiene la cattura in background con la notifica "microfono in uso".
+  Nella pratica Android passa a Chrome solo silenzio ~8 s dopo che la pagina va in
+  background (la diagnostica lo segnala come "silenzio assoluto").
+- **Mini finestra automatica** (opzione della modalità Chiamata): la pagina va a schermo
+  intero con sotto un video invisibile (webm registrato da un canvas) che la copre. Chrome
+  Android, se premi Home mentre un video è a schermo intero, si riduce da solo in
+  Picture-in-Picture: resta visibile e quindi conserva il microfono. Ogni tocco sulla
+  pagina richiede di nuovo lo schermo intero (serve un gesto).
 - **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
   ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
 - **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante, quindi

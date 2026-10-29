@@ -47,6 +47,7 @@ const el = {
   players: $('#players'), ka: $('#ka'), toast: $('#toast'),
   modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
   diag: $('#diag'), diagOut: $('#diagOut'), bgMic: $('#bgMic'),
+  pipAuto: $('#pipAuto'), pipVideo: $('#pipVideo'),
 };
 
 const state = {
@@ -340,8 +341,102 @@ function closeMic() {
 // Opzione della modalità Chiamata: il microfono resta aperto anche fuori dal browser
 // (Chrome Android mantiene la cattura in background con la sua notifica "microfono in uso").
 function keepMicInBackground() {
-  return state.joined && state.mode === 'call' && !state.callMuted && el.bgMic.checked;
+  return state.joined && state.mode === 'call' && !state.callMuted && (el.bgMic.checked || el.pipAuto.checked);
 }
+
+/* ---------------------------------------------------------- Mini finestra */
+
+// Android silenzia il microfono di Chrome appena la pagina va in background, ma non se
+// Chrome resta visibile in Picture-in-Picture. Chrome Android entra da solo in PiP quando
+// premi Home mentre un video riempie lo schermo intero: la pagina va a schermo intero con
+// sotto un video invisibile che la copre, e nella finestrella si vede quel video.
+let pipClip = null;
+
+function pipWanted() {
+  return state.joined && state.mode === 'call' && el.pipAuto.checked;
+}
+
+// Un webm vero (Blob URL) registrato da un canvas, non un MediaStream: è il caso
+// "video a schermo intero" che Chrome riconosce per il PiP automatico.
+function makePipClip() {
+  if (pipClip) return pipClip;
+  const c = document.createElement('canvas');
+  c.width = 320;
+  c.height = 180;
+  const g = c.getContext('2d');
+  const draw = (blink) => {
+    g.fillStyle = '#111418';
+    g.fillRect(0, 0, c.width, c.height);
+    g.textAlign = 'center';
+    g.fillStyle = '#e8ecf1';
+    g.font = '600 24px system-ui, sans-serif';
+    g.fillText('📻 Walkie-Talkie', 160, 76);
+    g.fillStyle = '#8b95a3';
+    g.font = '15px system-ui, sans-serif';
+    g.fillText('in chiamata · tocca per tornare', 160, 106);
+    g.fillStyle = blink ? '#ef4444' : '#5a1d1d';  // pallino che lampeggia: il video "si muove"
+    g.beginPath();
+    g.arc(160, 140, 7, 0, 2 * Math.PI);
+    g.fill();
+  };
+  pipClip = new Promise((resolve, reject) => {
+    const stream = c.captureStream(10);
+    const rec = new MediaRecorder(stream, { mimeType: 'video/webm', videoBitsPerSecond: 150000 });
+    const chunks = [];
+    let n = 0;
+    draw(true);
+    const timer = setInterval(() => draw(Math.floor(++n / 5) % 2 === 0), 100);
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onerror = (e) => reject(e.error);
+    rec.onstop = () => {
+      clearInterval(timer);
+      stream.getTracks().forEach((t) => t.stop());
+      resolve(URL.createObjectURL(new Blob(chunks, { type: 'video/webm' })));
+    };
+    rec.start();
+    setTimeout(() => rec.stop(), 2000);
+  }).catch((e) => {
+    pipClip = null;
+    logEvent('mini finestra: video non creato ' + (e?.name || ''));
+    return null;
+  });
+  return pipClip;
+}
+
+async function pipUpdate() {
+  const v = el.pipVideo;
+  if (!pipWanted()) {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    v.pause();
+    v.hidden = true;
+    return;
+  }
+  const url = await makePipClip();
+  if (!url || !pipWanted()) return;
+  if (v.src !== url) v.src = url;
+  v.hidden = false;
+  v.play().catch((e) => logEvent('mini finestra: video fermo ' + e.name));
+}
+
+// Lo schermo intero si può chiedere solo dentro un gesto: lo richiediamo a ogni tocco,
+// così tornando dalla finestrella basta toccare la pagina.
+function pipFullscreen() {
+  if (!pipWanted() || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  document.documentElement.requestFullscreen({ navigationUI: 'hide' })
+    .catch((e) => logEvent('schermo intero non concesso: ' + e.name));
+}
+
+document.addEventListener('pointerdown', pipFullscreen, true);
+document.addEventListener('fullscreenchange', () => {
+  logEvent(document.fullscreenElement ? 'schermo intero' : 'fine schermo intero');
+});
+// La finestrella PiP rimpicciolisce la pagina: lo registriamo per la diagnostica.
+let pipSmall = false;
+window.addEventListener('resize', () => {
+  const small = window.innerWidth < 300;
+  if (small !== pipSmall) logEvent(small ? `mini finestra ${innerWidth}x${innerHeight}` : 'pagina a dimensione piena');
+  pipSmall = small;
+});
 
 document.addEventListener('visibilitychange', () => {
   logEvent(document.hidden ? 'pagina in background' : 'pagina in primo piano');
@@ -763,6 +858,8 @@ function join() {
   if (el.diag.checked) ensureMeter();
   openMic();
   connect();
+  pipUpdate();
+  pipFullscreen();
 
   el.join.hidden = true;
   el.radio.hidden = false;
@@ -781,6 +878,7 @@ function leave() {
   state.users = [];
   players.forEach((p) => p.audio.pause());
   updateKeepAlive();
+  pipUpdate();
   el.radio.hidden = true;
   el.join.hidden = false;
 }
@@ -835,6 +933,7 @@ function setMode(mode) {
   state.callRetryAt = 0;
   if (state.tx) stopTx();  // onstop -> ensureCall riparte in modalità chiamata
   ensureCall();
+  pipUpdate();
   render();
 }
 el.modeRadio.addEventListener('click', () => setMode('radio'));
@@ -896,6 +995,11 @@ setInterval(() => {
   el.diagOut.textContent = lines.join('\n');
 }, 1000);
 el.bgMic.addEventListener('change', () => store('bgMic', el.bgMic.checked ? '1' : '0'));
+el.pipAuto.addEventListener('change', () => {
+  store('pipAuto', el.pipAuto.checked ? '1' : '0');
+  pipUpdate();
+  pipFullscreen();
+});
 // Serve un AudioContext (solo per misurare, non collegato all'uscita): va creato in un gesto.
 function ensureMeter() {
   if (!state.audioCtx) state.audioCtx = new AudioContext();
@@ -951,6 +1055,7 @@ el.keepAlive.addEventListener('change', () => {
   state.mode = load('mode') === 'call' ? 'call' : 'radio';
   el.diag.checked = load('diag') === '1';
   el.bgMic.checked = load('bgMic') === '1';
+  el.pipAuto.checked = load('pipAuto') === '1';
   el.diagOut.hidden = !el.diag.checked;
   el.duck.checked = load('duck') === '1';
   el.headphones.checked = load('headphones') === '1';

@@ -52,6 +52,11 @@
         <span>Microfono attivo anche fuori dal browser</span>
       </label>
       <p class="hint">I colleghi continuano a sentirti mentre usi altre app (Android mostra il pallino verde del microfono). Per smettere: "silenzia" oppure "Esci".</p>
+      <label class="switch">
+        <input type="checkbox" id="pipAuto">
+        <span>Mini finestra automatica quando esco</span>
+      </label>
+      <p class="hint">Android toglie il microfono a Chrome appena esci, ma non se Chrome resta visibile in una mini finestra. Con questa opzione la pagina va a schermo intero: premendo Home Chrome si riduce da solo a finestrella e i colleghi continuano a sentirti. Tocca la finestrella per tornare.</p>
     </div>
 
     <div id="status" class="status">Connessione…</div>
@@ -109,6 +114,7 @@
   <!-- Lettori di ricezione (MSE, uno per voce, creati all'ingresso) + keep-alive -->
   <div id="players" hidden></div>
   <audio id="ka" playsinline loop></audio>
+  <video id="pipVideo" class="pip-video" muted playsinline loop hidden></video>
 
   <div id="toast" class="toast" hidden></div>
 
