@@ -8,6 +8,15 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Browser Android diverso da Chrome: si passa a Chrome (o al Play Store se manca) -->
+  <section id="needChrome" class="screen" hidden>
+    <h1>📻 Walkie-Talkie</h1>
+    <p class="sub">Questa app funziona con Google Chrome: solo lì il microfono resta attivo quando esci dalla pagina.</p>
+    <a id="gotoChrome" class="primary" href="#">Apri in Chrome</a>
+    <p class="hint">Se Chrome non è installato si apre il Play Store per installarlo.</p>
+    <button type="button" id="stayHere" class="ghost">Continua con questo browser</button>
+  </section>
+
   <!-- Schermata di accesso -->
   <section id="join" class="screen">
     <h1>📻 Walkie-Talkie</h1>

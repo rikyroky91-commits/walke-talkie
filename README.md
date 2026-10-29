@@ -47,9 +47,11 @@ richiedevano almeno 200 ms di buffer e si inceppavano sulla rete mobile.
   Picture-in-Picture: resta visibile e quindi conserva il microfono. Ogni tocco sulla
   pagina richiede di nuovo lo schermo intero (serve un gesto). Il PiP all'uscita è una
   funzione di Chrome: sugli altri browser Android (Xiaomi, Samsung Internet, Firefox,
-  Opera…) la pagina mostra "Apri in Chrome" (link `intent://` con
-  `package=com.android.chrome`) e, se il browser ha l'API Picture-in-Picture, un tasto
-  per aprire la finestrella a mano.
+  Opera…) la pagina all'apertura salta da sola a Chrome (link `intent://` con
+  `package=com.android.chrome`; senza Chrome il sistema apre il Play Store tramite
+  `browser_fallback_url`). Se il browser blocca il salto resta la schermata "Apri in
+  Chrome", con "Continua con questo browser" per restare. La pagina aperta così porta
+  `wt_chrome=1` e non reindirizza più, così non si creano giri infiniti.
 - **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
   ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
 - **Niente cancellazione d'eco**: con `echoCancellation: true` Chrome Android apre il

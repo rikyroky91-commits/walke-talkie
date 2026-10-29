@@ -45,6 +45,7 @@ const el = {
   diag: $('#diag'), diagOut: $('#diagOut'), bgMic: $('#bgMic'),
   pipAuto: $('#pipAuto'), pipVideo: $('#pipVideo'),
   otherBrowser: $('#otherBrowser'), openChrome: $('#openChrome'), pipNow: $('#pipNow'),
+  needChrome: $('#needChrome'), gotoChrome: $('#gotoChrome'), stayHere: $('#stayHere'),
 };
 
 const state = {
@@ -398,10 +399,35 @@ function isChrome() {
 }
 const NEEDS_CHROME = IS_ANDROID && !isChrome();
 
+// Senza Chrome il sistema apre browser_fallback_url: la pagina di Chrome sul Play Store.
+// "wt_chrome=1" segna la pagina aperta così: lì non si reindirizza mai più (niente giri
+// infiniti se un giorno Chrome non venisse riconosciuto).
 function chromeIntentUrl() {
   const fallback = 'https://play.google.com/store/apps/details?id=com.android.chrome';
-  return `intent://${location.host}${location.pathname}${location.search}#Intent;scheme=https;package=com.android.chrome;`
+  const params = new URLSearchParams(location.search);
+  params.set('wt_chrome', '1');
+  return `intent://${location.host}${location.pathname}?${params}#Intent;scheme=https;package=com.android.chrome;`
     + `S.browser_fallback_url=${encodeURIComponent(fallback)};end`;
+}
+
+// Aperta da un browser Android che non è Chrome: al posto dell'accesso si mostra
+// "Apri in Chrome" e si prova subito a passarci da soli. Alcuni browser chiedono
+// conferma o bloccano il salto automatico: resta il tasto.
+function redirectToChrome() {
+  const params = new URLSearchParams(location.search);
+  let stay = false;
+  try { stay = !!sessionStorage.getItem('wt.stayHere'); } catch { /* storage non disponibile */ }
+  if (!NEEDS_CHROME || params.has('wt_chrome') || stay) return false;
+  el.gotoChrome.href = chromeIntentUrl();
+  el.join.hidden = true;
+  el.needChrome.hidden = false;
+  el.stayHere.addEventListener('click', () => {
+    try { sessionStorage.setItem('wt.stayHere', '1'); } catch { /* storage non disponibile */ }
+    el.needChrome.hidden = true;
+    el.join.hidden = false;
+  });
+  location.href = el.gotoChrome.href;
+  return true;
 }
 
 function renderBrowserWarn() {
@@ -1147,4 +1173,5 @@ el.keepAlive.addEventListener('change', () => {
     el.compat.textContent = 'Attenzione: ' + problems.join('; ') + '.';
     el.compat.hidden = false;
   }
+  redirectToChrome();
 })();
