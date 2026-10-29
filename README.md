@@ -51,6 +51,11 @@ richiedevano almeno 200 ms di buffer e si inceppavano sulla rete mobile.
 - **Niente cancellazione d'eco**: con `echoCancellation: true` Chrome Android apre il
   microfono come VOICE_COMMUNICATION e mette il telefono in modalità chiamata (anche
   l'uscita audio diventa "chiamata"). Per questo è sempre spenta.
+- **Rumore nelle pause** (Impostazioni → "Silenzia il rumore nelle pause", acceso di
+  default): tutto software nella pagina. Un passa-alto a 80 Hz toglie il rombo e un gate
+  nel worklet di cattura stima il rumore di fondo e, nelle pause, abbassa il microfono di
+  26 dB (apre in 5 ms, chiude dopo 250 ms con una coda di 120 ms). Prova in locale:
+  fruscio nelle pause da -51 a -74 dBFS, voce invariata.
 - **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante, quindi
   in vivavoce chi parla insieme a te può sentire un'eco della propria voce. Rimedi, nelle
   Impostazioni: le cuffie oppure "Abbassa gli altri mentre parlo"

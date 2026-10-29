@@ -21,22 +21,74 @@ const SOFT_SLACK = 0.02 * sampleRate;     // oltre obiettivo+20 ms si scartano i
 const HARD_SLACK = 0.2 * sampleRate;      // oltre obiettivo+200 ms si scarta comunque
 const QUIET = 0.01;                       // RMS sotto cui un blocco è "pausa" (-40 dBFS)
 
+// Gate di rumore (tutto software: i filtri VoIP del browser metterebbero Android in
+// modalità chiamata). Stima il rumore di fondo come il minimo del livello, che risale
+// piano; quando il livello supera il fondo di ~12 dB il microfono si apre, nelle pause
+// scende a -26 dB con una coda morbida, così il fruscio sparisce senza tagliare le parole.
+const GATE_OPEN = 4;                  // x rumore di fondo (+12 dB) per aprire
+const GATE_CLOSE = 2.5;               // x rumore di fondo (+8 dB) sotto cui si inizia a chiudere
+const GATE_MIN_OPEN = 0.003;          // mai aprire sotto -50 dBFS
+const GATE_FLOOR_RISE = 1.0005;       // il fondo risale di ~20% al secondo (se il rumore cresce)
+const GATE_HOLD = 0.25 * sampleRate;  // resta aperto 250 ms dopo l'ultima voce
+const GATE_CLOSED = 0.05;             // guadagno a gate chiuso (-26 dB)
+const GATE_ATTACK = 1 - Math.exp(-1 / (0.005 * sampleRate));   // apre in ~5 ms
+const GATE_RELEASE = 1 - Math.exp(-1 / (0.12 * sampleRate));   // chiude in ~120 ms
+
 class Capture extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.frame = options.processorOptions.frame;
     this.on = false;
+    this.gateOn = true;
+    this.floor = 0.001;
+    this.hold = 0;
+    this.gain = 1;
+    this.open = false;
+    this.sinceStats = 0;
     this.buf = new Float32Array(this.frame);
     this.n = 0;
     this.port.onmessage = (e) => {
-      this.on = e.data.on;
-      this.n = 0;
+      if ('gate' in e.data) this.gateOn = e.data.gate;
+      if ('on' in e.data) {
+        this.on = e.data.on;
+        this.n = 0;
+      }
     };
   }
 
+  // Il fondo si aggiorna sempre, anche quando non si trasmette: è pronto quando si parte.
+  gate(ch) {
+    let sum = 0;
+    for (let k = 0; k < ch.length; k++) sum += ch[k] * ch[k];
+    const rms = Math.sqrt(sum / ch.length);
+    this.floor = rms > 0 ? Math.min(this.floor * GATE_FLOOR_RISE, Math.max(rms, 1e-5)) : this.floor;
+    if (rms > Math.max(this.floor * GATE_OPEN, GATE_MIN_OPEN)) {
+      this.open = true;
+      this.hold = GATE_HOLD;
+    } else if (rms < this.floor * GATE_CLOSE) {
+      this.hold -= ch.length;
+      if (this.hold <= 0) this.open = false;
+    }
+    if (!this.on || !this.gateOn) return ch;
+    const out = new Float32Array(ch.length);
+    const goal = this.open ? 1 : GATE_CLOSED;
+    const rate = this.open ? GATE_ATTACK : GATE_RELEASE;
+    for (let k = 0; k < ch.length; k++) {
+      this.gain += (goal - this.gain) * rate;
+      out[k] = ch[k] * this.gain;
+    }
+    return out;
+  }
+
   process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
-    if (!this.on || !ch) return true;
+    const raw = inputs[0] && inputs[0][0];
+    if (!raw) return true;
+    const ch = this.gate(raw);
+    if (!this.on) return true;
+    if ((this.sinceStats += ch.length) >= sampleRate / 2) {
+      this.sinceStats = 0;
+      this.port.postMessage({ t: 'gate', open: this.open, floor: this.floor });
+    }
     let i = 0;
     while (i < ch.length) {
       const take = Math.min(ch.length - i, this.frame - this.n);

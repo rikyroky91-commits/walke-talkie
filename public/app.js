@@ -38,7 +38,7 @@ const el = {
   ptt: $('#ptt'), pttLabel: $('#pttLabel'), vox: $('#vox'), mic: $('#mic'),
   voxPanel: $('#voxPanel'), meterBar: $('#meterBar'), meterThr: $('#meterThr'),
   voxThr: $('#voxThr'), voxThrVal: $('#voxThrVal'), volume: $('#volume'),
-  duck: $('#duck'), headphones: $('#headphones'), keepAlive: $('#keepAlive'),
+  duck: $('#duck'), headphones: $('#headphones'), gate: $('#gate'), keepAlive: $('#keepAlive'),
   users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
   ka: $('#ka'), toast: $('#toast'),
   modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
@@ -72,6 +72,8 @@ const state = {
   playback: null,     // AudioWorkletNode wt-playback
   outGain: null,
   micSrc: null,
+  highpass: null,     // taglia il rombo sotto gli 80 Hz (vento, motori, scrivania)
+  gateInfo: null,     // stato del gate di rumore (dal thread audio)
   analyser: null,
   encConfig: null,
   pbStats: {},        // statistiche del jitter buffer per voce (dal thread audio)
@@ -102,7 +104,15 @@ function setupAudio() {
         numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
         processorOptions: { frame: Math.round(ac.sampleRate * FRAME_MS / 1000) },
       });
-      state.capture.port.onmessage = (e) => onMicFrame(e.data);
+      state.capture.port.onmessage = (e) => {
+        if (e.data instanceof Float32Array) onMicFrame(e.data);
+        else state.gateInfo = e.data;
+      };
+      state.capture.port.postMessage({ gate: el.gate.checked });
+      state.highpass = ac.createBiquadFilter();
+      state.highpass.type = 'highpass';
+      state.highpass.frequency.value = 80;
+      state.highpass.connect(state.capture);
       state.capture.connect(ac.destination);  // esce solo silenzio: serve perché il nodo venga elaborato
       state.playback = new AudioWorkletNode(ac, 'wt-playback', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
       state.playback.port.onmessage = (e) => { if (e.data.t === 'stats') state.pbStats = e.data.voices; };
@@ -319,7 +329,9 @@ function openMic() {
 function attachMic() {
   if (!state.capture || !state.stream || state.micSrc) return;
   state.micSrc = state.ac.createMediaStreamSource(state.stream);
-  state.micSrc.connect(state.capture);
+  // Riduzione rumore tutta nella pagina (passa-alto + gate nel worklet): i filtri del
+  // browser (noiseSuppression ecc.) metterebbero Android in modalità chiamata.
+  state.micSrc.connect(state.highpass);
   state.micSrc.connect(state.analyser);
 }
 
@@ -1006,6 +1018,7 @@ setInterval(() => {
     `mic ${track ? track.readyState + (track.muted ? ' MUTED' : '') + ' eco ' + JSON.stringify(track.getSettings().echoCancellation) : 'chiuso'}`
       + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ' ' + tx.source + ` ${tx.sent} pkt/s scartati ${tx.dropped}` : '-'}`,
     `livello mic ${level === null ? '?' : level === -Infinity ? 'SILENZIO ASSOLUTO' : Math.round(level) + ' dB'}`
+      + (state.gateInfo && el.gate.checked ? ` · gate ${state.gateInfo.open ? 'aperto' : 'chiuso'} fondo ${Math.round(20 * Math.log10(state.gateInfo.floor))} dB` : '')
       + ` · audio ${ac ? ac.state + ' ' + ac.sampleRate + ' Hz uscita ' + Math.round(((ac.outputLatency || 0) + (ac.baseLatency || 0)) * 1000) + ' ms' : '-'}`,
   ];
   if (tx) tx.sent = 0;
@@ -1052,6 +1065,10 @@ el.duck.addEventListener('change', () => {
   store('duck', el.duck.checked ? '1' : '0');
   applyVolume();
 });
+el.gate.addEventListener('change', () => {
+  store('gate', el.gate.checked ? '1' : '0');
+  state.capture?.port.postMessage({ gate: el.gate.checked });
+});
 el.headphones.addEventListener('change', () => {
   store('headphones', el.headphones.checked ? '1' : '0');
 });
@@ -1074,6 +1091,7 @@ el.keepAlive.addEventListener('change', () => {
   el.diagOut.hidden = !el.diag.checked;
   el.duck.checked = load('duck') === '1';
   el.headphones.checked = load('headphones') === '1';
+  el.gate.checked = load('gate') !== '0';
   el.keepAlive.checked = load('keepAlive') !== '0';
   store('aec', '0');  // opzione tolta: chi l'aveva accesa torna senza
   showThr();
