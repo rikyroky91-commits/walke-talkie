@@ -3,36 +3,25 @@
 /*
  * Walkie-Talkie su WebSocket — zero WebRTC.
  *
- * Invio:     getUserMedia (AEC/NS/AGC disattivati) -> MediaRecorder webm/opus a chunk
- *            da TIMESLICE ms -> WebSocket (frame binari).
- * Ricezione: WebSocket -> [id 8 byte | chunk] -> MediaSource/SourceBuffer -> <audio>.
- *            Un <audio> per ogni voce attiva (fino a PLAYER_SLOTS in contemporanea):
- *            su Android Chrome li mixa sul canale media (STREAM_MUSIC), non come chiamata.
- * Mic:       aperto solo con la pagina visibile; su visibilitychange(hidden) le tracce
- *            vengono fermate, gli <audio> continuano a suonare in background.
+ * Invio:     getUserMedia (filtri VoIP spenti) -> AudioWorklet (blocchi da 20 ms)
+ *            -> AudioEncoder opus -> WebSocket, un pacchetto ogni 20 ms [seq 2 byte | opus].
+ * Ricezione: WebSocket -> [id 8 byte | seq | opus] -> AudioDecoder (uno per voce)
+ *            -> AudioWorklet con jitter buffer adattivo e mix -> uscita dell'AudioContext.
+ *            Su Android l'AudioContext esce sul canale media (STREAM_MUSIC), non come chiamata.
+ * Mic:       aperto solo con la pagina visibile, salvo le opzioni della modalità Chiamata.
  */
 
-const TIMESLICE = 60;         // ms per chunk: Chrome codifica opus a frame da 60 ms, sotto non serve
+const SAMPLE_RATE = 48000;
 const BITRATE = 32000;        // bps opus mono, ottimo per la voce
-// Buffer adattivo. La pipeline MSE di Chrome vuole almeno ~200 ms davanti a sé, e sulla
-// rete mobile i pacchetti arrivano a raffiche: il buffer parte basso, cresce a ogni
-// interruzione e scende piano quando la rete è stabile. L'audio non si butta mai
-// (sentiresti pezzi di frase), salvo ritardi enormi.
-const BUF_MIN = 0.25;         // s
-const BUF_MAX = 1.2;          // s
-const BUF_STEP = 0.15;        // s in più a ogni interruzione
-const BUF_DECAY_MS = 20000;   // senza interruzioni per 20 s il buffer scende di 50 ms
-const DROP_LAG = 3.0;         // s oltre l'obiettivo: solo qui si salta in avanti
-const jitter = { target: BUF_MIN, lastChange: 0, underruns: 0 };
-const PLAYER_SLOTS = 4;       // voci contemporanee (uguale a MAX_SPEAKERS del server)
+const ENC_BACKLOG = 8 * 1024; // byte in uscita oltre cui si scartano pacchetti (meglio un buco che il ritardo)
+const MAX_VOICES = 4;         // voci contemporanee (uguale a MAX_SPEAKERS del server)
 const DUCK_VOLUME = 0.2;      // volume degli altri mentre parli, se "Abbassa gli altri" è attivo
 const VOX_HANG_MS = 900;      // la trasmissione VOX resta aperta dopo l'ultima voce
 const VOX_RX_GUARD_MS = 600;  // niente VOX subito dopo una ricezione (coda dell'altoparlante)
-const ID_LEN = 8;             // byte di id di chi parla in testa a ogni frame audio
-const PLAY_MIME = 'audio/webm;codecs=opus';
-const REC_MIME = ['audio/webm;codecs=opus', 'audio/webm']
-  .find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
-const MSE = window.MediaSource || window.ManagedMediaSource;
+const ID_LEN = 8;             // byte di id di chi parla in testa a ogni pacchetto
+const HDR_LEN = ID_LEN + 2;   // id + numero di sequenza
+const DEC_CONFIG = { codec: 'opus', sampleRate: SAMPLE_RATE, numberOfChannels: 1 };
+const SUPPORTED = !!(window.AudioEncoder && window.AudioDecoder && window.AudioWorkletNode);
 
 const $ = (s) => document.querySelector(s);
 const el = {
@@ -42,9 +31,9 @@ const el = {
   ptt: $('#ptt'), pttLabel: $('#pttLabel'), vox: $('#vox'), mic: $('#mic'),
   voxPanel: $('#voxPanel'), meterBar: $('#meterBar'), meterThr: $('#meterThr'),
   voxThr: $('#voxThr'), voxThrVal: $('#voxThrVal'), volume: $('#volume'),
-  duck: $('#duck'), headphones: $('#headphones'), keepAlive: $('#keepAlive'),
+  duck: $('#duck'), headphones: $('#headphones'), keepAlive: $('#keepAlive'), aec: $('#aec'),
   users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
-  players: $('#players'), ka: $('#ka'), toast: $('#toast'),
+  ka: $('#ka'), toast: $('#toast'),
   modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
   diag: $('#diag'), diagOut: $('#diagOut'), bgMic: $('#bgMic'),
   pipAuto: $('#pipAuto'), pipVideo: $('#pipVideo'),
@@ -61,7 +50,7 @@ const state = {
   mode: 'radio',      // 'radio' = tieni premuto, 'call' = microfono sempre aperto
   callMuted: false,
   callRetryAt: 0,
-  talkers: new Map(), // id -> {name, player, rx, bytes}: chi sta parlando (escluso me)
+  talkers: new Map(), // id -> {name, dec, ts, seq, bytes, lost}: chi sta parlando (escluso me)
   rxEndedAt: 0,
   stream: null,
   micOpening: null,
@@ -70,165 +59,139 @@ const state = {
   vox: false,
   voxThr: -42,
   voxLastLoud: 0,
-  audioCtx: null,
+  ac: null,           // AudioContext unico: cattura, misura del livello e riproduzione
+  audioReady: null,   // Promise: worklet caricato
+  capture: null,      // AudioWorkletNode wt-capture
+  playback: null,     // AudioWorkletNode wt-playback
+  outGain: null,
+  micSrc: null,
   analyser: null,
-  analyserSrc: null,
+  encConfig: null,
+  pbStats: {},        // statistiche del jitter buffer per voce (dal thread audio)
+  rtt: 0,
   busyUntil: 0,
 };
 
-/* ---------------------------------------------------------------- Player MSE */
+/* ------------------------------------------------------------------- Audio */
 
-class StreamPlayer {
-  constructor() {
-    this.audio = document.createElement('audio');
-    this.audio.playsInline = true;
-    el.players.append(this.audio);
-    this.owner = null;    // id di chi sta usando questo lettore
-    this.freedAt = 0;
-    this.segStart = 0;
-    this.queue = [];
-    // Buffer finito mentre la voce è ancora attiva = interruzione udibile: più margine.
-    // (Esclusi l'avvio di ogni stream e la fine di una trasmissione.)
-    this.audio.addEventListener('waiting', () => {
-      if (!this.owner || performance.now() - this.segStart < 1500) return;
-      jitter.underruns++;
-      jitter.target = Math.min(BUF_MAX, jitter.target + BUF_STEP);
-      jitter.lastChange = performance.now();
+// Va chiamata dentro un gesto dell'utente (sblocca l'audio).
+function setupAudio() {
+  if (state.ac) {
+    state.ac.resume();
+    return state.audioReady;
+  }
+  let ac;
+  try {
+    ac = new AudioContext({ latencyHint: 'interactive', sampleRate: SAMPLE_RATE });
+  } catch {
+    ac = new AudioContext({ latencyHint: 'interactive' });
+  }
+  state.ac = ac;
+  ac.addEventListener('statechange', () => logEvent('audio: ' + ac.state));
+  state.audioReady = Promise.all([ac.audioWorklet.addModule('audio-worklet.js'), pickEncoderConfig(ac.sampleRate)])
+    .then(([, cfg]) => {
+      state.encConfig = cfg;
+      state.capture = new AudioWorkletNode(ac, 'wt-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      state.capture.port.onmessage = (e) => onMicFrame(e.data);
+      state.capture.connect(ac.destination);  // esce solo silenzio: serve perché il nodo venga elaborato
+      state.playback = new AudioWorkletNode(ac, 'wt-playback', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+      state.playback.port.onmessage = (e) => { if (e.data.t === 'stats') state.pbStats = e.data.voices; };
+      state.outGain = ac.createGain();
+      state.playback.connect(state.outGain).connect(ac.destination);
+      state.analyser = ac.createAnalyser();
+      state.analyser.fftSize = 1024;
+      applyVolume();
+      attachMic();
+    })
+    .catch((e) => {
+      logEvent('audio non disponibile: ' + e.message);
+      toast('Audio non disponibile: ' + e.message);
     });
-    this.reset();
-  }
-
-  reset() {
-    this.queue = [];
-    this.sb = null;
-    this.audio.playbackRate = 1;
-    if ('latencyHint' in this.audio) this.audio.latencyHint = 0;  // Chrome sperimentale: buffer minimo
-    this.ms = new MSE();
-    if (window.ManagedMediaSource && this.ms instanceof window.ManagedMediaSource) {
-      this.audio.disableRemotePlayback = true;
-    }
-    const url = URL.createObjectURL(this.ms);
-    this.ms.addEventListener('sourceopen', () => {
-      URL.revokeObjectURL(url);
-      try {
-        this.sb = this.ms.addSourceBuffer(PLAY_MIME);
-      } catch (e) {
-        toast('Formato audio non supportato: ' + e.message);
-        return;
-      }
-      // "sequence": ogni trasmissione riparte da 0 ma viene accodata alla precedente,
-      // così l'<audio> non si ferma mai e riprende da solo quando arrivano dati.
-      this.sb.mode = 'sequence';
-      this.sb.addEventListener('updateend', () => { this.catchUp(); this.pump(); });
-      this.pump();
-    }, { once: true });
-    this.audio.src = url;
-    this.play();
-  }
-
-  play() {
-    if (this.audio.paused) this.audio.play().catch(() => {});
-  }
-
-  // Ogni trasmissione è un nuovo file webm (nuovo header EBML).
-  // - Pagina visibile: MediaSource nuova -> pipeline fresca, primo audio in ~0.35 s.
-  // - Pagina in background: non si cambia src (un nuovo play() potrebbe essere bloccato),
-  //   si accoda allo stesso SourceBuffer resettando il parser con abort(). Funziona sempre
-  //   ma Chrome, dopo ogni buffer vuoto, alza la soglia di avvio (~0.6 s).
-  beginSegment() {
-    this.segStart = performance.now();
-    if (!document.hidden) { this.reset(); return; }
-    this.queue.push('NEW_SEGMENT');
-    this.play();
-    this.pump();
-  }
-
-  push(buf) {
-    this.queue.push(buf);
-    this.pump();
-  }
-
-  pump() {
-    const sb = this.sb;
-    if (!sb || sb.updating || this.ms.readyState !== 'open') return;
-    while (this.queue.length) {
-      const item = this.queue.shift();
-      if (item === 'NEW_SEGMENT') {
-        try { sb.abort(); } catch { /* già pulito */ }
-        continue;
-      }
-      try {
-        sb.appendBuffer(item);
-      } catch (e) {
-        if (e.name === 'QuotaExceededError') {
-          this.queue.unshift(item);
-          this.evict(true);
-        } else {
-          console.warn('appendBuffer', e);
-          this.reset();
-        }
-      }
-      return;
-    }
-    this.evict(false);
-  }
-
-  // Tiene la latenza vicino a jitter.target recuperando il ritardo con una riproduzione
-  // appena più veloce (6–12%, tono della voce invariato). Salta in avanti solo con
-  // ritardi enormi.
-  catchUp() {
-    const a = this.audio;
-    const b = a.buffered;
-    if (!b.length) return;
-    const end = b.end(b.length - 1);
-    const lag = end - a.currentTime;
-    if (lag > jitter.target + DROP_LAG) {
-      a.currentTime = Math.max(b.start(b.length - 1), end - jitter.target);
-    } else if (lag > jitter.target + 0.5) {
-      a.playbackRate = 1.12;
-    } else if (lag > jitter.target + 0.15) {
-      a.playbackRate = Math.max(a.playbackRate === 1.12 ? 1.12 : 1, 1.06);
-    } else if (lag <= jitter.target) {
-      a.playbackRate = 1;
-    }
-    this.play();
-  }
-
-  // Libera l'audio già riprodotto per non far crescere la memoria all'infinito.
-  evict(force) {
-    const sb = this.sb;
-    const t = this.audio.currentTime;
-    if (!sb || sb.updating || !sb.buffered.length) return;
-    const start = sb.buffered.start(0);
-    if (t - start > (force ? 2 : 30)) sb.remove(start, t - 1);
-  }
-
-  lag() {
-    const b = this.audio.buffered;
-    return b.length ? Math.max(0, b.end(b.length - 1) - this.audio.currentTime) : 0;
-  }
+  ac.resume();
+  return state.audioReady;
 }
 
-const players = [];
-
-// Il lettore libero da più tempo, così la coda audio di chi ha appena finito non viene tagliata.
-function acquirePlayer(id) {
-  const free = players.filter((p) => !p.owner).sort((a, b) => a.freedAt - b.freedAt)[0];
-  if (free) free.owner = id;
-  return free || null;
-}
-
-function releasePlayer(p) {
-  if (!p) return;
-  p.owner = null;
-  p.freedAt = performance.now();
+// Opus a frame da 20 ms. Le opzioni opus avanzate non ci sono su tutti i Chrome.
+async function pickEncoderConfig(sampleRate) {
+  const base = { codec: 'opus', sampleRate, numberOfChannels: 1, bitrate: BITRATE };
+  const full = { ...base, opus: { frameDuration: 20000, complexity: 5, application: 'voip', signal: 'voice' } };
+  for (const cfg of [full, { ...base, opus: { frameDuration: 20000 } }, base]) {
+    try {
+      if ((await AudioEncoder.isConfigSupported(cfg)).supported) return cfg;
+    } catch { /* prova la successiva */ }
+  }
+  throw new Error('questo browser non codifica opus');
 }
 
 function applyVolume() {
+  if (!state.outGain) return;
   const tx = state.tx;
   const duck = el.duck.checked && tx && tx.source !== 'call' && tx.granted && !tx.stopped;
   const v = Number(el.volume.value) * (duck ? DUCK_VOLUME : 1);
-  players.forEach((p) => { p.audio.volume = v; });
+  state.outGain.gain.setTargetAtTime(v, state.ac.currentTime, 0.02);
+}
+
+/* ------------------------------------------------------------- Ricezione */
+
+function makeDecoder(id) {
+  const dec = new AudioDecoder({
+    output: (ad) => {
+      const pcm = new Float32Array(ad.numberOfFrames);
+      ad.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+      ad.close();
+      state.playback?.port.postMessage({ t: 'pcm', id, pcm }, [pcm.buffer]);
+    },
+    error: (e) => logEvent('decodifica: ' + e.message),
+  });
+  dec.configure(DEC_CONFIG);
+  return dec;
+}
+
+function startVoice(id, name) {
+  let t = state.talkers.get(id);
+  if (!t) {
+    t = { name, dec: null, ts: 0, seq: -1, bytes: 0, lost: 0 };
+    state.talkers.set(id, t);
+  }
+  t.name = name || t.name;
+  t.seq = -1;
+  state.playback?.port.postMessage({ t: 'start', id });
+}
+
+function endVoice(id) {
+  const t = state.talkers.get(id);
+  if (!t) return;
+  state.talkers.delete(id);
+  const dec = t.dec;
+  // Il thread audio suona quello che resta solo dopo gli ultimi pacchetti decodificati.
+  const done = () => {
+    state.playback?.port.postMessage({ t: 'end', id });
+    try { dec?.close(); } catch { /* già chiuso */ }
+  };
+  if (dec?.state === 'configured') dec.flush().then(done, done);
+  else done();
+}
+
+function clearTalkers() {
+  [...state.talkers.keys()].forEach(endVoice);
+  state.playback?.port.postMessage({ t: 'reset' });
+}
+
+function onAudio(buf) {
+  if (buf.byteLength <= HDR_LEN) return;
+  const id = String.fromCharCode(...new Uint8Array(buf, 0, ID_LEN));
+  const t = state.talkers.get(id);
+  if (!t) return;
+  const seq = new DataView(buf).getUint16(ID_LEN);
+  if (t.seq >= 0) {
+    const gap = (seq - t.seq - 1) & 0xffff;
+    if (gap && gap < 1000) t.lost += gap;  // pacchetti scartati dal server per rete lenta
+  }
+  t.seq = seq;
+  t.bytes += buf.byteLength;
+  if (!t.dec || t.dec.state === 'closed') t.dec = makeDecoder(id);
+  t.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: t.ts, data: new Uint8Array(buf, HDR_LEN) }));
+  t.ts += 20000;
 }
 
 /* ------------------------------------------------------------- Keep-alive */
@@ -272,8 +235,8 @@ function updateMediaSession() {
 function setupMediaSession() {
   if (!('mediaSession' in navigator)) return;
   updateMediaSession();
-  navigator.mediaSession.setActionHandler('play', () => { players.forEach((p) => p.play()); updateKeepAlive(); });
-  navigator.mediaSession.setActionHandler('pause', () => { players.forEach((p) => p.audio.pause()); el.ka.pause(); });
+  navigator.mediaSession.setActionHandler('play', () => { state.ac?.resume(); updateKeepAlive(); });
+  navigator.mediaSession.setActionHandler('pause', () => { state.ac?.suspend(); el.ka.pause(); });
 }
 
 /* --------------------------------------------------------------- Microfono */
@@ -284,7 +247,8 @@ function openMic() {
   state.micOpening = navigator.mediaDevices.getUserMedia({
     audio: {
       // Filtri VoIP spenti: Chrome non chiede il profilo VOICE_COMMUNICATION all'HAL.
-      echoCancellation: false,
+      // La cancellazione d'eco è un'opzione (in vivavoce toglie l'eco agli altri).
+      echoCancellation: el.aec.checked,
       noiseSuppression: false,
       autoGainControl: false,
       channelCount: 1,
@@ -297,7 +261,7 @@ function openMic() {
     state.stream = s;
     watchTrack(s);
     logEvent('mic aperto' + (document.hidden ? ' (in background)' : ''));
-    attachAnalyser();
+    attachMic();
     ensureCall();
     render();
     return s;
@@ -311,6 +275,19 @@ function openMic() {
   return state.micOpening;
 }
 
+// Collega il microfono al worklet di cattura e all'analizzatore (VOX, diagnostica).
+function attachMic() {
+  if (!state.capture || !state.stream || state.micSrc) return;
+  state.micSrc = state.ac.createMediaStreamSource(state.stream);
+  state.micSrc.connect(state.capture);
+  state.micSrc.connect(state.analyser);
+}
+
+function detachMic() {
+  state.micSrc?.disconnect();
+  state.micSrc = null;
+}
+
 // Android può mettere in muto o chiudere la traccia (altra app che prende il mic,
 // telefonata, risparmio energetico): se la chiude, la riapriamo e la chiamata riparte.
 function watchTrack(stream) {
@@ -322,7 +299,7 @@ function watchTrack(stream) {
     if (state.stream !== stream) return;
     logEvent('mic chiuso dal sistema: riapro');
     state.stream = null;
-    detachAnalyser();
+    detachMic();
     stopTx();
     if (state.joined && (!document.hidden || keepMicInBackground())) openMic();
   });
@@ -330,7 +307,7 @@ function watchTrack(stream) {
 
 function closeMic() {
   stopTx();
-  detachAnalyser();
+  detachMic();
   if (state.stream) {
     state.stream.getTracks().forEach((t) => t.stop());
     state.stream = null;
@@ -443,8 +420,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     if (!keepMicInBackground()) closeMic();
   } else if (state.joined) {
+    state.ac?.resume();
     openMic();
-    players.forEach((p) => p.play());
     updateKeepAlive();
   }
 });
@@ -454,41 +431,71 @@ window.addEventListener('pagehide', closeMic);
 
 function startTx(source) {
   if (state.tx || !state.joined || !state.connected) return;
-  if (!state.stream) {
+  if (!state.stream || !state.capture) {
     if (source === 'ptt') toast(state.micOpening ? 'Microfono in apertura…' : 'Microfono non disponibile');
     openMic();
     return;
   }
 
-  const rec = new MediaRecorder(state.stream, { mimeType: REC_MIME, audioBitsPerSecond: BITRATE });
-  const tx = { rec, source, granted: false, denied: false, stopped: false, pending: [] };
+  const tx = { source, granted: false, denied: false, stopped: false, stopSent: false, pending: [], seq: 0, ts: 0, enc: null, sent: 0, dropped: 0 };
+  tx.enc = new AudioEncoder({
+    output: (chunk) => {
+      if (tx.denied) return;
+      const pkt = new Uint8Array(2 + chunk.byteLength);
+      pkt[0] = (tx.seq >> 8) & 0xff;
+      pkt[1] = tx.seq & 0xff;
+      tx.seq = (tx.seq + 1) & 0xffff;
+      chunk.copyTo(pkt.subarray(2));
+      if (tx.granted) sendAudio(tx, pkt);
+      else tx.pending.push(pkt);
+    },
+    error: (e) => {
+      logEvent('codifica: ' + e.message);
+      stopTx();
+    },
+  });
+  tx.enc.configure(state.encConfig);
   state.tx = tx;
   state.awaiting.push(tx);
 
-  rec.ondataavailable = (e) => {
-    if (!e.data.size || tx.denied) return;
-    if (tx.granted) state.ws.send(e.data);
-    else tx.pending.push(e.data);
-  };
-  rec.onerror = (e) => logEvent('registrazione: errore ' + (e.error?.name || ''));
-  rec.onstop = () => {
-    tx.stopped = true;
-    if (tx.granted) send({ t: 'ptt_stop' });
-    if (state.tx === tx) state.tx = null;
-    ensureCall();
-    render();
-  };
-
-  // Registra subito (per non perdere la prima sillaba) e invia appena il server dà il via.
+  // Cattura subito (per non perdere la prima sillaba) e invia appena il server dà il via.
   send({ t: 'ptt_start', mode: source === 'call' ? 'call' : 'ptt' });
-  rec.start(TIMESLICE);
+  state.capture.port.postMessage({ on: true });
   if (source !== 'call') vibrate(25);
   render();
 }
 
+function onMicFrame(pcm) {
+  const tx = state.tx;
+  if (!tx || tx.stopped || tx.enc.state !== 'configured') return;
+  const ad = new AudioData({
+    format: 'f32-planar',
+    sampleRate: state.ac.sampleRate,
+    numberOfFrames: pcm.length,
+    numberOfChannels: 1,
+    timestamp: tx.ts,
+    data: pcm,
+  });
+  tx.ts += (pcm.length / state.ac.sampleRate) * 1e6;
+  tx.enc.encode(ad);
+  ad.close();
+}
+
+// Con la rete in salita bloccata è meglio perdere qualche pacchetto che accumulare ritardo.
+function sendAudio(tx, pkt) {
+  const ws = state.ws;
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount > ENC_BACKLOG) {
+    tx.dropped++;
+    return;
+  }
+  ws.send(pkt);
+  tx.sent++;
+}
+
 // Modalità chiamata: finché la pagina è visibile (o il mic resta attivo in background)
-// e il mic non è silenziato si trasmette sempre. Riparte da sola dopo un resync,
-// una riconnessione o il ritorno in primo piano.
+// e il mic non è silenziato si trasmette sempre. Riparte da sola dopo una
+// riconnessione o il ritorno in primo piano.
 function ensureCall() {
   if (state.mode !== 'call' || state.callMuted || state.tx || !state.joined || !state.connected
     || !state.stream || (document.hidden && !keepMicInBackground())
@@ -497,10 +504,27 @@ function ensureCall() {
 }
 setInterval(ensureCall, 500);
 
+function sendStop(tx) {
+  if (tx.stopSent) return;
+  tx.stopSent = true;
+  send({ t: 'ptt_stop' });
+}
+
 function stopTx() {
   const tx = state.tx;
-  if (!tx || tx.rec.state === 'inactive') return;
-  tx.rec.stop();
+  if (!tx || tx.stopped) return;
+  tx.stopped = true;
+  state.capture?.port.postMessage({ on: false });
+  const finish = () => {
+    try { tx.enc.close(); } catch { /* già chiuso */ }
+    if (tx.granted && !tx.denied) sendStop(tx);
+    if (state.tx === tx) state.tx = null;
+    ensureCall();
+    render();
+  };
+  // flush: gli ultimi 20 ms partono prima del ptt_stop.
+  if (!tx.denied && tx.enc.state === 'configured') tx.enc.flush().then(finish, finish);
+  else finish();
   render();
 }
 
@@ -509,9 +533,9 @@ function onFloorGranted() {
   if (!tx) return;
   tx.granted = true;
   if (tx.source === 'call') logEvent('in onda' + (document.hidden ? ' (in background)' : ''));
-  tx.pending.forEach((b) => state.ws.send(b));
+  tx.pending.forEach((p) => sendAudio(tx, p));
   tx.pending = [];
-  if (tx.stopped) send({ t: 'ptt_stop' });
+  if (tx.stopped && state.tx !== tx) sendStop(tx);
   render();
 }
 
@@ -525,47 +549,35 @@ function onFloorDenied() {
     state.callRetryAt = Date.now() + 5000;
     state.busyUntil = state.callRetryAt;
   }
-  if (tx.rec.state !== 'inactive') tx.rec.stop();
+  if (state.tx === tx) stopTx();
   if (tx.source === 'ptt') busy();
 }
 
 function abortTx() {
   state.awaiting = [];
-  if (state.tx) {
-    state.tx.denied = true;
-    if (state.tx.rec.state !== 'inactive') state.tx.rec.stop();
-    state.tx = null;
-  }
+  const tx = state.tx;
+  if (!tx) return;
+  tx.denied = true;
+  tx.stopped = true;
+  state.capture?.port.postMessage({ on: false });
+  try { tx.enc.close(); } catch { /* già chiuso */ }
+  state.tx = null;
 }
 
 function busy() {
   state.busyUntil = Date.now() + 1500;
   vibrate([60, 40, 60]);
-  toast(`Canale pieno: parlano già ${PLAYER_SLOTS} persone`);
+  toast(`Canale pieno: parlano già ${MAX_VOICES} persone`);
   render();
   setTimeout(render, 1600);
 }
 
 /* --------------------------------------------------------------------- VOX */
 
-function attachAnalyser() {
-  if (!state.audioCtx || !state.stream || state.analyser) return;
-  state.analyserSrc = state.audioCtx.createMediaStreamSource(state.stream);
-  state.analyser = state.audioCtx.createAnalyser();
-  state.analyser.fftSize = 1024;
-  state.analyserSrc.connect(state.analyser);
-}
-
-function detachAnalyser() {
-  state.analyserSrc?.disconnect();
-  state.analyserSrc = null;
-  state.analyser = null;
-}
-
 const voxBuf = new Float32Array(1024);
 function voxTick() {
   const an = state.analyser;
-  if (!state.vox || !an || state.mode === 'call') {
+  if (!state.vox || !an || !state.micSrc || state.mode === 'call') {
     el.meterBar.style.width = '0';
     return;
   }
@@ -594,19 +606,6 @@ function send(obj) {
   if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify(obj));
 }
 
-function clearTalkers() {
-  state.talkers.forEach((t) => releasePlayer(t.player));
-  state.talkers.clear();
-}
-
-function onAudio(buf) {
-  const id = String.fromCharCode(...new Uint8Array(buf, 0, ID_LEN));
-  const t = state.talkers.get(id);
-  if (!t) return;
-  t.bytes = (t.bytes || 0) + buf.byteLength;
-  if (t.rx) t.player.push(buf.slice(ID_LEN));
-}
-
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   const ws = new WebSocket(proto + location.host + '/ws');
@@ -632,8 +631,8 @@ function connect() {
         state.channel = m.channel;
         state.users = m.users;
         clearTalkers();
-        // Chi sta già parlando lo ascolti dalla sua prossima trasmissione.
-        m.talking.forEach((u) => state.talkers.set(u.id, { name: u.name, player: null, rx: false }));
+        // I pacchetti opus sono indipendenti: chi sta già parlando si sente subito.
+        m.talking.forEach((u) => startVoice(u.id, u.name));
         el.chName.textContent = m.channel;
         history.replaceState(null, '', '?c=' + encodeURIComponent(m.channel));
         setupMediaSession();
@@ -642,16 +641,10 @@ function connect() {
       case 'users':
         state.users = m.users;
         break;
-      case 'talk_start': {
-        const t = state.talkers.get(m.id) || { name: m.name, player: null, rx: false };
-        t.player = t.player || acquirePlayer(m.id);
-        t.rx = !!t.player;
-        t.player?.beginSegment();
-        state.talkers.set(m.id, t);
-        applyVolume();
+      case 'talk_start':
+        startVoice(m.id, m.name);
         updateMediaSession();
         break;
-      }
       case 'talk_end':
         if (m.id === state.myId) {
           // "stop" è la conferma di un mio ptt_stop: arriva quando potrei già essere
@@ -661,33 +654,24 @@ function connect() {
             stopTx();
           }
         } else {
-          releasePlayer(state.talkers.get(m.id)?.player);
-          state.talkers.delete(m.id);
+          endVoice(m.id);
           state.rxEndedAt = Date.now();
           updateMediaSession();
         }
         break;
-      case 'talk_skip': {
-        const t = state.talkers.get(m.id);
-        if (t) t.rx = false;
-        break;
-      }
       case 'floor_granted':
         onFloorGranted();
         break;
       case 'floor_denied':
         onFloorDenied();
         break;
-      case 'resync':
-        // È entrato qualcuno: riparto con uno stream nuovo (onstop -> ensureCall) così sente anche me.
-        if (state.tx?.source === 'call' && state.tx.granted) stopTx();
-        break;
       case 'tx_limit':
         toast('Trasmissione troppo lunga, chiusa automaticamente');
         stopTx();
         break;
       case 'pong':
-        el.rtt.textContent = 'RTT ' + Math.round(performance.now() - m.ts) + ' ms';
+        state.rtt = performance.now() - m.ts;
+        el.rtt.textContent = 'RTT ' + Math.round(state.rtt) + ' ms';
         break;
       case 'error':
         if (m.code === 'auth') {
@@ -716,22 +700,21 @@ function connect() {
   };
 }
 
-setInterval(() => send({ t: 'ping', ts: performance.now() }), 5000);
+setInterval(() => send({ t: 'ping', ts: performance.now() }), 3000);
+
+// Ritardo bocca-orecchio stimato: frame + metà RTT + jitter buffer + uscita audio.
+function estimatedDelay() {
+  const bufs = Object.values(state.pbStats).map((v) => v.buf);
+  if (!bufs.length) return null;
+  const out = (state.ac?.outputLatency || 0) + (state.ac?.baseLatency || 0);
+  return 0.02 + state.rtt / 2000 + Math.max(...bufs) + out;
+}
+
 setInterval(() => {
   if (!state.joined) return;
-  const now = performance.now();
-  if (jitter.target > BUF_MIN && now - jitter.lastChange > BUF_DECAY_MS) {
-    jitter.target = Math.max(BUF_MIN, jitter.target - 0.05);
-    jitter.lastChange = now;
-  }
-  let lag = 0;
-  state.talkers.forEach((t) => {
-    if (!t.rx) return;
-    t.player.catchUp();
-    lag = Math.max(lag, t.player.lag());
-  });
-  el.lag.textContent = 'buffer ' + Math.round(lag * 1000) + ' ms';
-}, 100);
+  const d = estimatedDelay();
+  el.lag.textContent = d === null ? 'ritardo —' : 'ritardo ~' + Math.round(d * 1000) + ' ms';
+}, 500);
 
 /* --------------------------------------------------------------------- UI */
 
@@ -778,9 +761,7 @@ function render() {
     status = 'Apertura…';
     cls = 'busy';
   } else if (names.length) {
-    const late = [...state.talkers.values()].some((t) => !t.rx);
-    status = '🔊 ' + names.join(', ') + (names.length > 1 ? ' parlano' : ' sta parlando')
-      + (late ? ' (ascolti dalla prossima)' : '');
+    status = '🔊 ' + names.join(', ') + (names.length > 1 ? ' parlano' : ' sta parlando');
     cls = 'rx';
   } else if (Date.now() < state.busyUntil) {
     status = 'Canale pieno';
@@ -825,15 +806,15 @@ function toast(msg) {
   el.toast.textContent = msg;
   el.toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.toast.hidden = true; }, 2500);
+  toastTimer = setTimeout(() => { el.toast.hidden = true; }, 3000);
 }
 
 function vibrate(p) {
-  try { navigator.vibrate?.(p); } catch { /* non supportato */ }
+  if (navigator.vibrate) navigator.vibrate(p);
 }
 
 function store(key, value) {
-  try { localStorage.setItem('wt.' + key, value); } catch { /* storage bloccato */ }
+  try { localStorage.setItem('wt.' + key, value); } catch { /* storage non disponibile */ }
 }
 
 function load(key) {
@@ -848,16 +829,11 @@ function join() {
   store('channel', el.channel.value.trim());
 
   state.joined = true;
-  // Siamo dentro un gesto dell'utente: sblocca l'autoplay di tutti gli <audio>.
-  if (!players.length) {
-    for (let i = 0; i < PLAYER_SLOTS; i++) players.push(new StreamPlayer());
-  } else {
-    players.forEach((p) => { releasePlayer(p); p.reset(); });
-  }
+  // Siamo dentro un gesto dell'utente: sblocca l'AudioContext e il keep-alive.
+  setupAudio();
   updateKeepAlive();
-  if (el.diag.checked) ensureMeter();
   openMic();
-  connect();
+  state.audioReady.then(() => { if (state.joined && !state.ws) connect(); });
   pipUpdate();
   pipFullscreen();
 
@@ -876,7 +852,6 @@ function leave() {
   state.connected = false;
   clearTalkers();
   state.users = [];
-  players.forEach((p) => p.audio.pause());
   updateKeepAlive();
   pipUpdate();
   el.radio.hidden = true;
@@ -894,6 +869,7 @@ el.leave.addEventListener('click', leave);
 let pttHeld = false;
 el.ptt.addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  state.ac?.resume();
   if (state.mode === 'call') {
     state.callMuted = !state.callMuted;
     if (state.callMuted) stopTx();
@@ -931,7 +907,7 @@ function setMode(mode) {
   store('mode', mode);
   state.callMuted = false;
   state.callRetryAt = 0;
-  if (state.tx) stopTx();  // onstop -> ensureCall riparte in modalità chiamata
+  stopTx();  // finish -> ensureCall riparte in modalità chiamata
   ensureCall();
   pipUpdate();
   render();
@@ -945,22 +921,19 @@ el.modeCall.addEventListener('click', () => setMode('call'));
 const levelBuf = new Float32Array(1024);
 let silentSince = 0;
 function micLevel() {
-  if (!state.analyser) return null;
+  if (!state.analyser || !state.micSrc) return null;
   state.analyser.getFloatTimeDomainData(levelBuf);
   let sum = 0;
   for (let i = 0; i < levelBuf.length; i++) sum += levelBuf[i] * levelBuf[i];
   return sum === 0 ? -Infinity : 10 * Math.log10(sum / levelBuf.length);
 }
 
-// Diagnostica: cosa sta facendo ogni lettore, per capire i problemi sui telefoni.
+// Diagnostica: cosa sta facendo l'audio, per capire i problemi sui telefoni.
 let diagLast = performance.now();
 setInterval(() => {
-  if (!el.diag.checked || !state.joined) return;
   const now = performance.now();
   const secs = (now - diagLast) / 1000;
   diagLast = now;
-  const track = state.stream?.getAudioTracks()[0];
-  const tx = state.tx;
   const level = micLevel();
   if (level === -Infinity && state.stream) {
     if (!silentSince) silentSince = now;
@@ -972,56 +945,49 @@ setInterval(() => {
     if (silentSince === -1) logEvent('mic: torna il suono');
     silentSince = 0;
   }
+  const tx = state.tx;
+  const kbps = (bytes) => Math.round((bytes * 8) / 1000 / secs);
+  if (!el.diag.checked || !state.joined) {
+    state.talkers.forEach((t) => { t.bytes = 0; });
+    if (tx) tx.sent = 0;
+    return;
+  }
+  const track = state.stream?.getAudioTracks()[0];
+  const ac = state.ac;
   const lines = [
     `modo ${state.mode}${state.callMuted ? ' (muto)' : ''} · ws ${state.connected ? 'ok' : 'giù'} · visibile ${!document.hidden}`,
-    `mic ${track ? track.readyState + (track.muted ? ' MUTED' : '') + ' ' + JSON.stringify(track.getSettings().echoCancellation) : 'chiuso'}`
-      + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ' ' + tx.source + ' rec=' + tx.rec.state : '-'}`,
+    `mic ${track ? track.readyState + (track.muted ? ' MUTED' : '') + ' eco ' + JSON.stringify(track.getSettings().echoCancellation) : 'chiuso'}`
+      + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ' ' + tx.source + ` ${tx.sent} pkt/s scartati ${tx.dropped}` : '-'}`,
     `livello mic ${level === null ? '?' : level === -Infinity ? 'SILENZIO ASSOLUTO' : Math.round(level) + ' dB'}`
-      + ` · audioCtx ${state.audioCtx?.state ?? '-'}`,
-    `buffer obiettivo ${Math.round(jitter.target * 1000)} ms · interruzioni ${jitter.underruns}`,
+      + ` · audio ${ac ? ac.state + ' ' + ac.sampleRate + ' Hz uscita ' + Math.round(((ac.outputLatency || 0) + (ac.baseLatency || 0)) * 1000) + ' ms' : '-'}`,
   ];
+  if (tx) tx.sent = 0;
   state.talkers.forEach((t, id) => {
-    const kbps = Math.round(((t.bytes || 0) * 8) / 1000 / secs);
+    const pb = state.pbStats[id];
+    lines.push(`voce ${t.name}: ${kbps(t.bytes)} kbit/s · persi ${t.lost}`
+      + (pb ? ` · buffer ${Math.round(pb.buf * 1000)}/${Math.round(pb.target * 1000)} ms · interruzioni ${pb.underruns} · recuperati ${pb.dropped.toFixed(1)} s` : ''));
     t.bytes = 0;
-    lines.push(`voce ${t.name}: ${t.rx ? 'ricevo' : 'in attesa'} ${kbps} kbit/s · lettore ${t.player ? players.indexOf(t.player) : '-'}`);
-  });
-  players.forEach((p, i) => {
-    const a = p.audio;
-    lines.push(`#${i} ${p.owner ? state.talkers.get(p.owner)?.name ?? '?' : 'libero'} ${a.paused ? 'PAUSA' : 'play'} rs=${a.readyState}`
-      + ` t=${a.currentTime.toFixed(1)} lag=${Math.round(p.lag() * 1000)} vol=${a.volume} x${a.playbackRate}`
-      + ` ms=${p.ms.readyState}${a.error ? ' ERR ' + a.error.message : ''}`);
   });
   lines.push('— eventi —', ...events);
   el.diagOut.textContent = lines.join('\n');
 }, 1000);
+
 el.bgMic.addEventListener('change', () => store('bgMic', el.bgMic.checked ? '1' : '0'));
 el.pipAuto.addEventListener('change', () => {
   store('pipAuto', el.pipAuto.checked ? '1' : '0');
   pipUpdate();
   pipFullscreen();
 });
-// Serve un AudioContext (solo per misurare, non collegato all'uscita): va creato in un gesto.
-function ensureMeter() {
-  if (!state.audioCtx) state.audioCtx = new AudioContext();
-  state.audioCtx.resume();
-  attachAnalyser();
-}
 
 el.diag.addEventListener('change', () => {
   el.diagOut.hidden = !el.diag.checked;
   store('diag', el.diag.checked ? '1' : '0');
-  if (el.diag.checked) ensureMeter();
 });
 
-el.vox.addEventListener('change', async () => {
+el.vox.addEventListener('change', () => {
   state.vox = el.vox.checked;
   el.voxPanel.hidden = !state.vox;
-  if (state.vox && !state.audioCtx) {
-    // L'AudioContext serve solo per misurare il livello del mic (non è collegato all'uscita).
-    state.audioCtx = new AudioContext();
-    attachAnalyser();
-  }
-  state.audioCtx?.resume();
+  state.ac?.resume();
   if (!state.vox && state.tx?.source === 'vox') stopTx();
 });
 
@@ -1044,6 +1010,14 @@ el.keepAlive.addEventListener('change', () => {
   store('keepAlive', el.keepAlive.checked ? '1' : '0');
   updateKeepAlive();
 });
+// La cancellazione d'eco si decide all'apertura del mic: lo riapriamo.
+el.aec.addEventListener('change', () => {
+  store('aec', el.aec.checked ? '1' : '0');
+  if (state.stream) {
+    closeMic();
+    openMic();
+  }
+});
 
 /* -------------------------------------------------------------------- Avvio */
 
@@ -1060,12 +1034,12 @@ el.keepAlive.addEventListener('change', () => {
   el.duck.checked = load('duck') === '1';
   el.headphones.checked = load('headphones') === '1';
   el.keepAlive.checked = load('keepAlive') !== '0';
+  el.aec.checked = load('aec') === '1';
   showThr();
 
   const problems = [];
   if (!window.isSecureContext) problems.push('serve HTTPS (o localhost) per usare il microfono');
-  if (!REC_MIME) problems.push('questo browser non registra in webm/opus (usa Chrome o Firefox)');
-  if (!MSE || !MSE.isTypeSupported(PLAY_MIME)) problems.push('questo browser non riproduce webm/opus via MediaSource');
+  if (!SUPPORTED) problems.push('questo browser non ha WebCodecs/AudioWorklet (usa Chrome aggiornato)');
   if (problems.length) {
     el.compat.textContent = 'Attenzione: ' + problems.join('; ') + '.';
     el.compat.hidden = false;

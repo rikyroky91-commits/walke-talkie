@@ -3,9 +3,11 @@ Walkie-Talkie relay server (WebSocket, zero WebRTC).
 
 - Serve i file statici in ./public
 - /ws : canali in cui possono parlare fino a MAX_SPEAKERS persone in contemporanea
-- I chunk audio (webm/opus da MediaRecorder) arrivano come frame binari e vengono
-  inoltrati agli altri preceduti dall'id (8 byte ASCII) di chi parla, così ogni
-  ascoltatore li smista nel lettore audio giusto.
+- I pacchetti audio (opus da 20 ms, [seq 2 byte | opus]) arrivano come frame binari e
+  vengono inoltrati a tutti gli altri del canale preceduti dall'id (8 byte ASCII) di chi
+  parla, così ogni ascoltatore li smista nel decoder giusto. Ogni pacchetto è
+  indipendente: chi entra a metà sente subito, e a un ascoltatore lento si possono
+  saltare pacchetti senza rompere niente.
 
 Avvio:
     python server.py                      # http://0.0.0.0:8080
@@ -36,7 +38,7 @@ MAX_SPEAKERS = 4            # voci contemporanee per canale (= lettori audio nel
 MAX_TX_SECONDS = 120        # durata massima di una trasmissione
 SILENT_TX_TIMEOUT = 4.0     # chiude la trasmissione se chi parla non invia audio
 SILENT_CALL_TIMEOUT = 30.0  # in chiamata si tollerano pause lunghe (telefono in background, rete lenta)
-MAX_CLIENT_BACKLOG = 48 * 1024  # ~15 s di audio in coda: l'ascoltatore lento salta la trasmissione
+MAX_CLIENT_BACKLOG = 16 * 1024  # oltre ~1 s di audio in coda si saltano pacchetti: meglio un buco del ritardo
 MAX_NAME = 32
 
 log = logging.getLogger("walkie")
@@ -58,12 +60,8 @@ class Client:
 class Tx:
     """Una trasmissione in corso."""
 
-    def __init__(self, listeners: set[Client], call: bool):
+    def __init__(self, call: bool):
         now = time.monotonic()
-        # Solo chi è presente all'inizio riceve: lo stream webm ha l'header
-        # nel primo chunk, chi entra a metà aspetta la trasmissione successiva
-        # (in modalità chiamata il server chiede a chi parla di ripartire).
-        self.listeners = listeners
         self.call = call          # microfono aperto: nessun limite di durata
         self.started = now
         self.last_audio = now
@@ -110,8 +108,6 @@ async def leave(client: Client):
         return
     client.channel = None
     channel.clients.discard(client)
-    for tx in channel.speakers.values():
-        tx.listeners.discard(client)
     await end_tx(channel, client, "disconnect")
     if channel.clients:
         await broadcast(channel, {"t": "users", "users": channel.users()})
@@ -147,12 +143,6 @@ async def handle_json(client: Client, msg: dict):
             "maxSpeakers": MAX_SPEAKERS,
         })
         await broadcast(channel, {"t": "users", "users": channel.users()}, exclude=client)
-        # Le chiamate aperte non finiscono mai da sole: chi parla riparte con un nuovo
-        # stream (nuovo header webm) così anche il nuovo arrivato lo sente.
-        await asyncio.gather(*(
-            send_json(speaker, {"t": "resync"})
-            for speaker, tx in channel.speakers.items() if tx.call and speaker is not client
-        ))
         return
 
     channel = client.channel
@@ -163,7 +153,7 @@ async def handle_json(client: Client, msg: dict):
         if client not in channel.speakers and len(channel.speakers) >= MAX_SPEAKERS:
             await send_json(client, {"t": "floor_denied", "by": channel.talking()})
             return
-        channel.speakers[client] = Tx({c for c in channel.clients if c is not client}, msg.get("mode") == "call")
+        channel.speakers[client] = Tx(msg.get("mode") == "call")
         log.info("[%s] %s parla (%d voci)", channel.name, client.name, len(channel.speakers))
         await send_json(client, {"t": "floor_granted"})
         await broadcast(channel, {"t": "talk_start", **client.info()}, exclude=client)
@@ -182,23 +172,21 @@ async def relay_audio(client: Client, data: bytes):
     tx.last_audio = time.monotonic()
     frame = client.id_bytes + data
     sends = []
-    for listener in list(tx.listeners):
+    for listener in channel.clients:
+        if listener is client or listener.ws.closed:
+            continue
         backlog = listener.transport.get_write_buffer_size() if listener.transport else 0
-        if listener.ws.closed or backlog > MAX_CLIENT_BACKLOG:
-            # Saltare chunk a metà corromperebbe lo stream: l'ascoltatore lento
-            # perde il resto di questa trasmissione e riparte dalla prossima.
-            tx.listeners.discard(listener)
-            sends.append(send_json(listener, {"t": "talk_skip", "id": client.id}))
-        else:
-            sends.append(send_audio(tx, listener, frame))
+        if backlog > MAX_CLIENT_BACKLOG:
+            continue  # ascoltatore lento: perde questo pacchetto, non accumula ritardo
+        sends.append(send_audio(listener, frame))
     await asyncio.gather(*sends)
 
 
-async def send_audio(tx: Tx, listener: Client, frame: bytes):
+async def send_audio(listener: Client, frame: bytes):
     try:
         await listener.ws.send_bytes(frame)
     except ConnectionError:
-        tx.listeners.discard(listener)
+        pass
 
 
 async def ws_handler(request: web.Request):
