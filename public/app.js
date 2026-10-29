@@ -46,6 +46,7 @@ const el = {
   pipAuto: $('#pipAuto'), pipVideo: $('#pipVideo'),
   otherBrowser: $('#otherBrowser'), openChrome: $('#openChrome'), pipNow: $('#pipNow'),
   needChrome: $('#needChrome'), gotoChrome: $('#gotoChrome'), stayHere: $('#stayHere'),
+  gotoChrome2: $('#gotoChrome2'), copyLink: $('#copyLink'),
 };
 
 const state = {
@@ -399,16 +400,44 @@ function isChrome() {
 }
 const NEEDS_CHROME = IS_ANDROID && !isChrome();
 
+// Indirizzo da aprire in Chrome, con il canale (Chrome non ha i dati salvati di questo
+// browser). "wt_chrome=1" segna la pagina aperta così: lì non si reindirizza mai più
+// (niente giri infiniti se un giorno Chrome non venisse riconosciuto).
+function chromeTarget() {
+  const params = new URLSearchParams(location.search);
+  if (!params.get('c') && el.channel.value.trim()) params.set('c', el.channel.value.trim());
+  params.set('wt_chrome', '1');
+  return { path: `${location.host}${location.pathname}?${params}`, url: `https://${location.host}${location.pathname}?${params}` };
+}
+
 // Senza Chrome il sistema apre browser_fallback_url: la pagina di Chrome sul Play Store.
-// "wt_chrome=1" segna la pagina aperta così: lì non si reindirizza mai più (niente giri
-// infiniti se un giorno Chrome non venisse riconosciuto).
+// action VIEW + BROWSABLE esplicite: alcuni browser senza aprono Chrome senza la pagina.
 function chromeIntentUrl() {
   const fallback = 'https://play.google.com/store/apps/details?id=com.android.chrome';
-  const params = new URLSearchParams(location.search);
-  params.set('wt_chrome', '1');
-  return `intent://${location.host}${location.pathname}?${params}#Intent;scheme=https;package=com.android.chrome;`
+  return `intent://${chromeTarget().path}#Intent;scheme=https;action=android.intent.action.VIEW;`
+    + `category=android.intent.category.BROWSABLE;package=com.android.chrome;`
     + `S.browser_fallback_url=${encodeURIComponent(fallback)};end`;
 }
+
+// Seconda via: lo schema googlechrome:// di Chrome Android, che passa l'indirizzo come
+// parametro (non ha il ripiego sul Play Store).
+function chromeSchemeUrl() {
+  return 'googlechrome://navigate?url=' + encodeURIComponent(chromeTarget().url);
+}
+
+// Terza via: il link negli appunti, da incollare nella barra di Chrome.
+function copyChromeLink() {
+  const url = chromeTarget().url;
+  navigator.clipboard?.writeText(url).catch(() => {});
+  return url;
+}
+[() => el.gotoChrome, () => el.gotoChrome2, () => el.openChrome].forEach((get) => {
+  get().addEventListener('click', copyChromeLink);
+});
+el.copyLink.addEventListener('click', () => {
+  copyChromeLink();
+  toast('Link copiato: incollalo nella barra degli indirizzi di Chrome');
+});
 
 // Aperta da un browser Android che non è Chrome: al posto dell'accesso si mostra
 // "Apri in Chrome" e si prova subito a passarci da soli. Alcuni browser chiedono
@@ -419,6 +448,7 @@ function redirectToChrome() {
   try { stay = !!sessionStorage.getItem('wt.stayHere'); } catch { /* storage non disponibile */ }
   if (!NEEDS_CHROME || params.has('wt_chrome') || stay) return false;
   el.gotoChrome.href = chromeIntentUrl();
+  el.gotoChrome2.href = chromeSchemeUrl();
   el.join.hidden = true;
   el.needChrome.hidden = false;
   el.stayHere.addEventListener('click', () => {

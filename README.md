@@ -51,7 +51,9 @@ richiedevano almeno 200 ms di buffer e si inceppavano sulla rete mobile.
   `package=com.android.chrome`; senza Chrome il sistema apre il Play Store tramite
   `browser_fallback_url`). Se il browser blocca il salto resta la schermata "Apri in
   Chrome", con "Continua con questo browser" per restare. La pagina aperta così porta
-  `wt_chrome=1` e non reindirizza più, così non si creano giri infiniti.
+  `wt_chrome=1` e non reindirizza più, così non si creano giri infiniti. Se Chrome si
+  apre senza la pagina ci sono altre due vie: `googlechrome://navigate?url=` e il link
+  copiato negli appunti (ogni tocco sui pulsanti lo copia).
 - **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
   ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
 - **Niente cancellazione d'eco**: con `echoCancellation: true` Chrome Android apre il

@@ -150,7 +150,8 @@ header { display: flex; justify-content: space-between; align-items: center; }
   font-size: 14px;
 }
 .browser-warn p { margin: 0; }
-.browser-warn .primary { text-align: center; text-decoration: none; }
+.browser-warn .primary, #needChrome .primary { text-align: center; text-decoration: none; }
+.link-btn { text-align: center; text-decoration: none; padding: 10px 12px; }
 
 .diag {
   margin: 0;
