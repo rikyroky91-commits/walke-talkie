@@ -482,25 +482,37 @@ el.pipNow.addEventListener('click', async () => {
 
 // Un webm vero (Blob URL) registrato da un canvas, non un MediaStream: è il caso
 // "video a schermo intero" che Chrome riconosce per il PiP automatico.
+// Il video è registrato una volta per canale e nome (contenuto della finestrella se
+// Chrome mostra il video invece della pagina).
+let pipClipKey = '';
 function makePipClip() {
-  if (pipClip) return pipClip;
+  const channel = el.channel.value.trim();
+  const me = el.name.value.trim();
+  const key = channel + '\n' + me;
+  if (pipClip && pipClipKey === key) return pipClip;
+  pipClipKey = key;
   const c = document.createElement('canvas');
-  c.width = 320;
-  c.height = 180;
+  c.width = 480;
+  c.height = 270;
   const g = c.getContext('2d');
+  const fit = (text, max) => (text.length > max ? text.slice(0, max - 1) + '…' : text);
   const draw = (blink) => {
     g.fillStyle = '#0e0f14';
     g.fillRect(0, 0, c.width, c.height);
     g.textAlign = 'center';
-    g.fillStyle = '#eceef4';
+    g.fillStyle = '#a78bfa';
     g.font = '700 26px system-ui, sans-serif';
-    g.fillText('🕸 ' + APP_NAME, 160, 76);
+    g.fillText('🕸 ' + APP_NAME, 240, 58);
+    g.fillStyle = '#eceef4';
+    g.font = '700 40px system-ui, sans-serif';
+    g.fillText(fit('#' + channel, 18), 240, 124);
     g.fillStyle = '#8a90a2';
-    g.font = '15px system-ui, sans-serif';
-    g.fillText('in chiamata · tocca per tornare', 160, 106);
+    g.font = '22px system-ui, sans-serif';
+    g.fillText(fit(me ? `${me} · microfono attivo` : 'microfono attivo', 32), 240, 168);
+    g.fillText('tocca per tornare alla chiamata', 240, 202);
     g.fillStyle = blink ? '#34d399' : '#14503b';  // pallino che lampeggia: il video "si muove"
     g.beginPath();
-    g.arc(160, 140, 7, 0, 2 * Math.PI);
+    g.arc(240, 238, 9, 0, 2 * Math.PI);
     g.fill();
   };
   pipClip = new Promise((resolve, reject) => {
@@ -553,21 +565,21 @@ function pipFullscreen(e) {
 }
 
 document.addEventListener('pointerdown', pipFullscreen, true);
+// Entrando a schermo intero Chrome copre il fondo dello schermo con il suo messaggio
+// per qualche secondo: intanto la barra in basso sta più su (classe fs-hint).
+let fsHintTimer = 0;
 document.addEventListener('fullscreenchange', () => {
-  logEvent(document.fullscreenElement ? 'schermo intero' : 'fine schermo intero');
-  fitHeight();
-  setTimeout(fitHeight, 300);  // alcuni telefoni ridimensionano dopo l'evento
+  const fs = !!document.fullscreenElement;
+  document.documentElement.classList.toggle('fs-hint', fs);
+  clearTimeout(fsHintTimer);
+  if (fs) fsHintTimer = setTimeout(() => document.documentElement.classList.remove('fs-hint'), 5000);
+  // Misure per la diagnostica: se la barra finisse fuori dallo schermo si vede qui.
+  setTimeout(() => {
+    const bottom = Math.round(el.composer.getBoundingClientRect().bottom);
+    logEvent(`${fs ? 'schermo intero' : 'fine schermo intero'}: finestra ${innerWidth}x${innerHeight}`
+      + ` · visibile ${Math.round(window.visualViewport?.height || 0)} · barra fino a ${bottom}`);
+  }, 400);
 });
-
-// Altezza visibile reale (schermo intero, tastiera aperta, rotazione): 100dvh non
-// sempre si aggiorna a schermo intero e la barra in basso finiva fuori dallo schermo.
-function fitHeight() {
-  const h = window.visualViewport?.height || window.innerHeight;
-  document.documentElement.style.setProperty('--app-h', Math.round(h) + 'px');
-}
-window.addEventListener('resize', fitHeight);
-window.visualViewport?.addEventListener('resize', fitHeight);
-fitHeight();
 // La finestrella PiP rimpicciolisce la pagina: lo registriamo per la diagnostica.
 let pipSmall = false;
 window.addEventListener('resize', () => {

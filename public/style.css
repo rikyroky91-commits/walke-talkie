@@ -88,16 +88,14 @@ button { font: inherit; cursor: pointer; color: inherit; }
 
 /* ------------------------------------------------------------------ App */
 
-/* Altezza misurata dalla pagina (--app-h): a schermo intero alcuni Android (Redmi)
-   non aggiornano 100dvh e la barra in basso finiva fuori dallo schermo. */
+/* Ancorata ai quattro bordi dello schermo visibile (non a un'altezza calcolata): a
+   schermo intero, con la tastiera aperta o ruotando, la barra in basso resta sempre
+   sul bordo inferiore. */
 .app {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
+  inset: 0;
   max-width: 720px;
   margin: 0 auto;
-  height: var(--app-h, 100dvh);
   display: flex;
   flex-direction: column;
   padding-top: env(safe-area-inset-top);
@@ -302,6 +300,11 @@ button { font: inherit; cursor: pointer; color: inherit; }
 }
 /* A schermo intero la barra dei gesti di Android sta sopra la pagina: un po' di margine. */
 :root:fullscreen .composer { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+/* Appena si entra a schermo intero Chrome mostra per qualche secondo, in basso, il
+   messaggio "per uscire dalla modalità a schermo intero…": la barra sale sopra di lui
+   e poi torna giù. */
+.composer { transition: margin-bottom .3s ease; }
+:root.fs-hint .composer { margin-bottom: 120px; }
 :root:fullscreen .app { padding-top: max(8px, env(safe-area-inset-top)); }
 .composer input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .composer #text { flex: 1; border-radius: 22px; padding: 11px 16px; }
@@ -350,15 +353,34 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   color: var(--muted);
 }
 
-/* Video invisibile che copre lo schermo: serve solo al PiP automatico di Chrome Android. */
+/* Video che copre lo schermo, nascosto sotto l'app (che ha lo sfondo pieno): serve al
+   PiP automatico di Chrome Android. Non trasparente: se la finestrella mostra il video,
+   deve vedersi il suo contenuto e non un riquadro nero. */
+.app { background: var(--bg); }
 .pip-video {
   position: fixed;
   inset: 0;
   width: 100%;
   height: 100%;
-  opacity: 0;
+  object-fit: contain;
+  background: var(--bg);
   pointer-events: none;
   z-index: -1;
+}
+
+/* Finestrella (PiP): la pagina diventa piccolissima. Resta solo la chiamata, dal vivo:
+   chi c'è, chi parla (bagliore) e lo stato del microfono. */
+@media (max-width: 420px) and (max-height: 300px) {
+  .topbar, .feed, .composer, .browser-warn, .stats, .mute, .toast { display: none !important; }
+  .app { padding: 0; justify-content: center; }
+  .call { margin: 0; flex: 1; border-radius: 0; border: 0; padding: 8px; gap: 6px; justify-content: center; }
+  .people { justify-content: center; gap: 8px; margin: 0; padding: 10px 6px 4px; }
+  .person { width: 44px; }
+  .avatar { width: 38px; height: 38px; font-size: 14px; }
+  .badge { width: 16px; height: 16px; font-size: 9px; }
+  .person-name { font-size: 10px; max-width: 44px; }
+  .call-bar { justify-content: center; text-align: center; }
+  .status { font-size: 12px; }
 }
 
 .toast {
