@@ -565,14 +565,8 @@ function pipFullscreen(e) {
 }
 
 document.addEventListener('pointerdown', pipFullscreen, true);
-// Entrando a schermo intero Chrome copre il fondo dello schermo con il suo messaggio
-// per qualche secondo: intanto la barra in basso sta più su (classe fs-hint).
-let fsHintTimer = 0;
 document.addEventListener('fullscreenchange', () => {
   const fs = !!document.fullscreenElement;
-  document.documentElement.classList.toggle('fs-hint', fs);
-  clearTimeout(fsHintTimer);
-  if (fs) fsHintTimer = setTimeout(() => document.documentElement.classList.remove('fs-hint'), 5000);
   // Misure per la diagnostica: se la barra finisse fuori dallo schermo si vede qui.
   setTimeout(() => {
     const bottom = Math.round(el.composer.getBoundingClientRect().bottom);
