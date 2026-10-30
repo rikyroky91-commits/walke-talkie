@@ -44,7 +44,8 @@ il funzionamento tecnico è nel [README](README.md).
   scrivere era coperta dal messaggio di Chrome ("per uscire dalla modalità a schermo
   intero…"). Correzioni fatte:
   - l'app è ancorata ai bordi dello schermo visibile;
-  - per 5 s dopo l'ingresso a schermo intero la barra sale di 120 px sopra il messaggio.
+  - a schermo intero la barra resta sempre 120 px sopra il fondo: sul Redmi la fascia
+    bassa resta coperta anche dopo il messaggio di Chrome (alzarla solo per 5 s non bastava).
 
   Da riprovare. Se non basta: Impostazioni → Mostra diagnostica. Il registro scrive
   `schermo intero: finestra LxA · visibile A · barra fino a Y`; se Y supera A, la barra è
