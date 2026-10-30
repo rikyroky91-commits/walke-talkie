@@ -116,6 +116,8 @@ class Voice {
     this.boost = 0;         // margine temporaneo dopo un'interruzione
     this.underruns = 0;
     this.dropped = 0;
+    this.sq = 0;            // energia suonata dall'ultimo livello inviato (per chi parla)
+    this.cnt = 0;
   }
 
   get target() {
@@ -133,7 +135,14 @@ class Voice {
     while (i < n && this.chunks.length) {
       const c = this.chunks[0];
       const take = Math.min(n - i, c.length - this.pos);
-      if (out) for (let k = 0; k < take; k++) out[i + k] += c[this.pos + k] * gain;
+      if (out) {
+        for (let k = 0; k < take; k++) {
+          const x = c[this.pos + k];
+          out[i + k] += x * gain;
+          this.sq += x * x;
+        }
+        this.cnt += take;
+      }
       i += take;
       this.pos += take;
       if (this.pos === c.length) {
@@ -162,6 +171,7 @@ class Playback extends AudioWorkletProcessor {
     this.learned = new Map();   // obiettivo per ogni voce, tra una trasmissione e l'altra
     this.gain = 1;
     this.sinceStats = 0;
+    this.sinceLevels = 0;
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
 
@@ -235,6 +245,19 @@ class Playback extends AudioWorkletProcessor {
       }
     }
     for (let k = 0; k < n; k++) out[k] = Math.max(-1, Math.min(1, out[k]));
+
+    // Livello di ogni voce 10 volte al secondo: la pagina illumina chi sta parlando.
+    this.sinceLevels += n;
+    if (this.sinceLevels >= sampleRate / 10) {
+      this.sinceLevels = 0;
+      const levels = {};
+      this.voices.forEach((v, id) => {
+        levels[id] = v.cnt ? Math.sqrt(v.sq / v.cnt) : 0;
+        v.sq = 0;
+        v.cnt = 0;
+      });
+      this.port.postMessage({ t: 'levels', levels });
+    }
 
     this.sinceStats += n;
     if (this.sinceStats >= sampleRate / 2) {

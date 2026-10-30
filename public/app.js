@@ -1,18 +1,23 @@
 'use strict';
 
 /*
- * Walkie-Talkie su WebSocket — zero WebRTC.
+ * Aracne: chiamata di gruppo e condivisione su WebSocket — zero WebRTC.
  *
- * Invio:     getUserMedia (filtri VoIP spenti) -> AudioWorklet (blocchi da 10 ms)
- *            -> AudioEncoder opus -> WebSocket, un pacchetto ogni 10 ms
- *            [istante audio in unità da 10 ms, 2 byte | opus].
- * Ricezione: WebSocket -> [id 8 byte | istante | opus] -> AudioDecoder (uno per voce)
- *            -> AudioWorklet con jitter buffer e mix -> uscita dell'AudioContext.
- *            L'obiettivo del buffer è il jitter misurato sugli arrivi degli ultimi 10 s.
- *            Su Android l'AudioContext esce sul canale media (STREAM_MUSIC), non come chiamata.
- * Mic:       aperto solo con la pagina visibile, salvo le opzioni della modalità Chiamata.
+ * Voce, invio:     getUserMedia (filtri VoIP spenti) -> AudioWorklet (blocchi da 10 ms)
+ *                  -> AudioEncoder opus -> WebSocket, un pacchetto ogni 10 ms
+ *                  [istante audio in unità da 10 ms, 2 byte | opus].
+ * Voce, ricezione: WebSocket -> [id 8 byte | istante | opus] -> AudioDecoder (uno per voce)
+ *                  -> AudioWorklet con jitter buffer e mix -> uscita dell'AudioContext.
+ *                  L'obiettivo del buffer è il jitter misurato sugli arrivi degli ultimi 10 s.
+ *                  Su Android l'AudioContext esce sul canale media (STREAM_MUSIC), non come chiamata.
+ * Condivisi:       messaggi e link sul WebSocket; i file (anche APK) con POST /upload,
+ *                  fuori dal WebSocket, così un file grande non rallenta la voce.
+ * Mic:             sempre aperto finché la pagina è visibile (o nella mini finestra); il
+ *                  tasto silenzia. MAI echoCancellation/noiseSuppression/autoGainControl:
+ *                  Android passerebbe in modalità chiamata.
  */
 
+const APP_NAME = 'Aracne';
 const SAMPLE_RATE = 48000;
 const FRAME_MS = 10;          // durata di un pacchetto: meno attesa prima di partire
 const UNIT_US = 10000;        // l'istante nel pacchetto è in unità da 10 ms
@@ -22,9 +27,6 @@ const JIT_PERCENTILE = 0.97;  // il buffer copre il 97% dei ritardi d'arrivo...
 const JIT_MARGIN = 0.01;      // ...più 10 ms
 const ENC_BACKLOG = 8 * 1024; // byte in uscita oltre cui si scartano pacchetti (meglio un buco che il ritardo)
 const MAX_VOICES = 4;         // voci contemporanee (uguale a MAX_SPEAKERS del server)
-const DUCK_VOLUME = 0.2;      // volume degli altri mentre parli, se "Abbassa gli altri" è attivo
-const VOX_HANG_MS = 900;      // la trasmissione VOX resta aperta dopo l'ultima voce
-const VOX_RX_GUARD_MS = 600;  // niente VOX subito dopo una ricezione (coda dell'altoparlante)
 const ID_LEN = 8;             // byte di id di chi parla in testa a ogni pacchetto
 const HDR_LEN = ID_LEN + 2;   // id + istante audio
 const DEC_CONFIG = { codec: 'opus', sampleRate: SAMPLE_RATE, numberOfChannels: 1 };
@@ -32,17 +34,14 @@ const SUPPORTED = !!(window.AudioEncoder && window.AudioDecoder && window.AudioW
 
 const $ = (s) => document.querySelector(s);
 const el = {
-  join: $('#join'), radio: $('#radio'), joinForm: $('#joinForm'), joinError: $('#joinError'),
+  join: $('#join'), app: $('#app'), joinForm: $('#joinForm'), joinError: $('#joinError'),
   name: $('#name'), channel: $('#channel'), code: $('#code'), compat: $('#compat'),
   chName: $('#chName'), conn: $('#conn'), leave: $('#leave'), status: $('#status'),
-  ptt: $('#ptt'), pttLabel: $('#pttLabel'), vox: $('#vox'), mic: $('#mic'),
-  voxPanel: $('#voxPanel'), meterBar: $('#meterBar'), meterThr: $('#meterThr'),
-  voxThr: $('#voxThr'), voxThrVal: $('#voxThrVal'), volume: $('#volume'),
-  duck: $('#duck'), headphones: $('#headphones'), gate: $('#gate'), keepAlive: $('#keepAlive'),
-  users: $('#users'), userCount: $('#userCount'), rtt: $('#rtt'), lag: $('#lag'),
-  ka: $('#ka'), toast: $('#toast'),
-  modeRadio: $('#modeRadio'), modeCall: $('#modeCall'), callHint: $('#callHint'), voxRow: $('#voxRow'),
-  diag: $('#diag'), diagOut: $('#diagOut'), bgMic: $('#bgMic'),
+  mute: $('#mute'), people: $('#people'), rtt: $('#rtt'), lag: $('#lag'),
+  feed: $('#feed'), feedEmpty: $('#feedEmpty'), composer: $('#composer'), text: $('#text'), fileInput: $('#fileInput'),
+  settings: $('#settings'), openSettings: $('#openSettings'), closeSettings: $('#closeSettings'),
+  volume: $('#volume'), gate: $('#gate'), keepAlive: $('#keepAlive'), bgMic: $('#bgMic'),
+  diag: $('#diag'), diagOut: $('#diagOut'), ka: $('#ka'), toast: $('#toast'),
   pipAuto: $('#pipAuto'), pipVideo: $('#pipVideo'),
   otherBrowser: $('#otherBrowser'), openChrome: $('#openChrome'), pipNow: $('#pipNow'),
   needChrome: $('#needChrome'), gotoChrome: $('#gotoChrome'), stayHere: $('#stayHere'),
@@ -55,20 +54,18 @@ const state = {
   ws: null,
   backoff: 500,
   myId: null,
+  token: null,        // autorizza i caricamenti di file
+  maxUpload: 100 * 1024 * 1024,
   channel: '',
   users: [],
-  mode: 'radio',      // 'radio' = tieni premuto, 'call' = microfono sempre aperto
   callMuted: false,
   callRetryAt: 0,
-  talkers: new Map(), // id -> {name, dec, ts, seq, bytes, lost}: chi sta parlando (escluso me)
-  rxEndedAt: 0,
+  talkers: new Map(), // id -> {name, dec, seq, unit, step, arrivals, bytes, lost}: chi è in chiamata (escluso me)
+  levels: {},         // id -> livello della voce (dal thread audio), per illuminare chi parla
   stream: null,
   micOpening: null,
   tx: null,           // trasmissione corrente
   awaiting: [],       // trasmissioni in attesa di floor_granted/denied (FIFO)
-  vox: false,
-  voxThr: -42,
-  voxLastLoud: 0,
   ac: null,           // AudioContext unico: cattura, misura del livello e riproduzione
   audioReady: null,   // Promise: worklet caricato
   capture: null,      // AudioWorkletNode wt-capture
@@ -118,7 +115,10 @@ function setupAudio() {
       state.highpass.connect(state.capture);
       state.capture.connect(ac.destination);  // esce solo silenzio: serve perché il nodo venga elaborato
       state.playback = new AudioWorkletNode(ac, 'wt-playback', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
-      state.playback.port.onmessage = (e) => { if (e.data.t === 'stats') state.pbStats = e.data.voices; };
+      state.playback.port.onmessage = (e) => {
+        if (e.data.t === 'stats') state.pbStats = e.data.voices;
+        else if (e.data.t === 'levels') state.levels = e.data.levels;
+      };
       state.outGain = ac.createGain();
       state.playback.connect(state.outGain).connect(ac.destination);
       state.analyser = ac.createAnalyser();
@@ -150,10 +150,7 @@ async function pickEncoderConfig(sampleRate) {
 
 function applyVolume() {
   if (!state.outGain) return;
-  const tx = state.tx;
-  const duck = el.duck.checked && tx && tx.source !== 'call' && tx.granted && !tx.stopped;
-  const v = Number(el.volume.value) * (duck ? DUCK_VOLUME : 1);
-  state.outGain.gain.setTargetAtTime(v, state.ac.currentTime, 0.02);
+  state.outGain.gain.setTargetAtTime(Number(el.volume.value), state.ac.currentTime, 0.02);
 }
 
 /* ------------------------------------------------------------- Ricezione */
@@ -249,7 +246,7 @@ setInterval(updateJitterTargets, 500);
 /* ------------------------------------------------------------- Keep-alive */
 
 // WAV di rumore a -60 dBFS (inudibile) in loop: la pagina resta "in riproduzione"
-// anche tra una trasmissione e l'altra, così Android non la congela in background.
+// anche nelle pause, così Android non la congela in background.
 function keepAliveUrl(seconds = 2, rate = 8000, amp = 0.001) {
   const n = seconds * rate;
   const buf = new ArrayBuffer(44 + n * 2);
@@ -279,9 +276,10 @@ function talkerNames() {
 function updateMediaSession() {
   if (!('mediaSession' in navigator)) return;
   const names = talkerNames();
-  navigator.mediaSession.metadata = names.length
-    ? new MediaMetadata({ title: names.join(', ') + (names.length > 1 ? ' parlano' : ' sta parlando'), artist: 'Canale ' + state.channel })
-    : new MediaMetadata({ title: 'Canale ' + state.channel, artist: 'Walkie-Talkie' });
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: names.length ? 'In chiamata con ' + names.join(', ') : 'Canale ' + state.channel,
+    artist: APP_NAME,
+  });
 }
 
 function setupMediaSession() {
@@ -328,7 +326,7 @@ function openMic() {
   return state.micOpening;
 }
 
-// Collega il microfono al worklet di cattura e all'analizzatore (VOX, diagnostica).
+// Collega il microfono al worklet di cattura e all'analizzatore (livello, diagnostica).
 function attachMic() {
   if (!state.capture || !state.stream || state.micSrc) return;
   state.micSrc = state.ac.createMediaStreamSource(state.stream);
@@ -370,10 +368,10 @@ function closeMic() {
   render();
 }
 
-// Opzione della modalità Chiamata: il microfono resta aperto anche fuori dal browser
-// (Chrome Android mantiene la cattura in background con la sua notifica "microfono in uso").
+// Il microfono resta aperto anche fuori dalla pagina con la mini finestra o con l'opzione
+// "Microfono attivo anche fuori dal browser".
 function keepMicInBackground() {
-  return state.joined && state.mode === 'call' && !state.callMuted && (el.bgMic.checked || el.pipAuto.checked);
+  return state.joined && !state.callMuted && (el.bgMic.checked || el.pipAuto.checked);
 }
 
 /* ---------------------------------------------------------- Mini finestra */
@@ -385,7 +383,7 @@ function keepMicInBackground() {
 let pipClip = null;
 
 function pipWanted() {
-  return state.joined && state.mode === 'call' && el.pipAuto.checked;
+  return state.joined && el.pipAuto.checked;
 }
 
 // Il PiP automatico all'uscita è una funzione di Chrome, non uno standard: il browser
@@ -431,9 +429,7 @@ function copyChromeLink() {
   navigator.clipboard?.writeText(url).catch(() => {});
   return url;
 }
-[() => el.gotoChrome, () => el.gotoChrome2, () => el.openChrome].forEach((get) => {
-  get().addEventListener('click', copyChromeLink);
-});
+[el.gotoChrome, el.gotoChrome2, el.openChrome].forEach((a) => a.addEventListener('click', copyChromeLink));
 el.copyLink.addEventListener('click', () => {
   copyChromeLink();
   toast('Link copiato: incollalo nella barra degli indirizzi di Chrome');
@@ -461,7 +457,7 @@ function redirectToChrome() {
 }
 
 function renderBrowserWarn() {
-  el.otherBrowser.hidden = !(NEEDS_CHROME && state.mode === 'call');
+  el.otherBrowser.hidden = !NEEDS_CHROME;
   el.openChrome.href = chromeIntentUrl();
   // Se questo browser ha almeno l'API Picture-in-Picture, la finestrella si apre a mano.
   el.pipNow.hidden = !document.pictureInPictureEnabled;
@@ -493,16 +489,16 @@ function makePipClip() {
   c.height = 180;
   const g = c.getContext('2d');
   const draw = (blink) => {
-    g.fillStyle = '#111418';
+    g.fillStyle = '#0e0f14';
     g.fillRect(0, 0, c.width, c.height);
     g.textAlign = 'center';
-    g.fillStyle = '#e8ecf1';
-    g.font = '600 24px system-ui, sans-serif';
-    g.fillText('📻 Walkie-Talkie', 160, 76);
-    g.fillStyle = '#8b95a3';
+    g.fillStyle = '#eceef4';
+    g.font = '700 26px system-ui, sans-serif';
+    g.fillText('🕸 ' + APP_NAME, 160, 76);
+    g.fillStyle = '#8a90a2';
     g.font = '15px system-ui, sans-serif';
     g.fillText('in chiamata · tocca per tornare', 160, 106);
-    g.fillStyle = blink ? '#ef4444' : '#5a1d1d';  // pallino che lampeggia: il video "si muove"
+    g.fillStyle = blink ? '#34d399' : '#14503b';  // pallino che lampeggia: il video "si muove"
     g.beginPath();
     g.arc(160, 140, 7, 0, 2 * Math.PI);
     g.fill();
@@ -547,11 +543,13 @@ async function pipUpdate() {
 }
 
 // Lo schermo intero si può chiedere solo dentro un gesto: lo richiediamo a ogni tocco,
-// così tornando dalla finestrella basta toccare la pagina.
-function pipFullscreen() {
+// così tornando dalla finestrella basta toccare la pagina. Non mentre si scrive o si
+// sceglie un file (la tastiera e il selettore di file escono dallo schermo intero).
+function pipFullscreen(e) {
   if (!pipWanted() || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  if (e?.target?.closest?.('#composer, dialog')) return;
   document.documentElement.requestFullscreen({ navigationUI: 'hide' })
-    .catch((e) => logEvent('schermo intero non concesso: ' + e.name));
+    .catch((err) => logEvent('schermo intero non concesso: ' + err.name));
 }
 
 document.addEventListener('pointerdown', pipFullscreen, true);
@@ -580,15 +578,10 @@ window.addEventListener('pagehide', closeMic);
 
 /* ---------------------------------------------------------- Trasmissione */
 
-function startTx(source) {
-  if (state.tx || !state.joined || !state.connected) return;
-  if (!state.stream || !state.capture) {
-    if (source === 'ptt') toast(state.micOpening ? 'Microfono in apertura…' : 'Microfono non disponibile');
-    openMic();
-    return;
-  }
+function startTx() {
+  if (state.tx || !state.joined || !state.connected || !state.stream || !state.capture) return;
 
-  const tx = { source, granted: false, denied: false, stopped: false, stopSent: false, pending: [], ts: 0, enc: null, sent: 0, dropped: 0 };
+  const tx = { granted: false, denied: false, stopped: false, stopSent: false, pending: [], ts: 0, enc: null, sent: 0, dropped: 0 };
   tx.enc = new AudioEncoder({
     output: (chunk) => {
       if (tx.denied) return;
@@ -610,9 +603,8 @@ function startTx(source) {
   state.awaiting.push(tx);
 
   // Cattura subito (per non perdere la prima sillaba) e invia appena il server dà il via.
-  send({ t: 'ptt_start', mode: source === 'call' ? 'call' : 'ptt' });
+  send({ t: 'ptt_start', mode: 'call' });
   state.capture.port.postMessage({ on: true });
-  if (source !== 'call') vibrate(25);
   render();
 }
 
@@ -644,14 +636,14 @@ function sendAudio(tx, pkt) {
   tx.sent++;
 }
 
-// Modalità chiamata: finché la pagina è visibile (o il mic resta attivo in background)
-// e il mic non è silenziato si trasmette sempre. Riparte da sola dopo una
-// riconnessione o il ritorno in primo piano.
+// Finché la pagina è visibile (o il mic resta attivo in background) e il mic non è
+// silenziato si trasmette sempre. Riparte da sola dopo una riconnessione o il ritorno
+// in primo piano.
 function ensureCall() {
-  if (state.mode !== 'call' || state.callMuted || state.tx || !state.joined || !state.connected
+  if (state.callMuted || state.tx || !state.joined || !state.connected
     || !state.stream || (document.hidden && !keepMicInBackground())
     || Date.now() < state.callRetryAt) return;
-  startTx('call');
+  startTx();
 }
 setInterval(ensureCall, 500);
 
@@ -673,7 +665,7 @@ function stopTx() {
     ensureCall();
     render();
   };
-  // flush: gli ultimi 20 ms partono prima del ptt_stop.
+  // flush: gli ultimi 10 ms partono prima del ptt_stop.
   if (!tx.denied && tx.enc.state === 'configured') tx.enc.flush().then(finish, finish);
   else finish();
   render();
@@ -683,7 +675,7 @@ function onFloorGranted() {
   const tx = state.awaiting.shift();
   if (!tx) return;
   tx.granted = true;
-  if (tx.source === 'call') logEvent('in onda' + (document.hidden ? ' (in background)' : ''));
+  logEvent('in onda' + (document.hidden ? ' (in background)' : ''));
   tx.pending.forEach((p) => sendAudio(tx, p));
   tx.pending = [];
   if (tx.stopped && state.tx !== tx) sendStop(tx);
@@ -695,13 +687,10 @@ function onFloorDenied() {
   if (!tx) return;
   tx.denied = true;
   tx.pending = [];
-  if (tx.source === 'call') {
-    // Canale pieno: riprova tra qualche secondo senza tempestare di avvisi.
-    state.callRetryAt = Date.now() + 5000;
-    state.busyUntil = state.callRetryAt;
-  }
+  // Chiamata piena: riprova tra qualche secondo senza tempestare di avvisi.
+  state.callRetryAt = Date.now() + 5000;
+  state.busyUntil = state.callRetryAt;
   if (state.tx === tx) stopTx();
-  if (tx.source === 'ptt') busy();
 }
 
 function abortTx() {
@@ -715,41 +704,208 @@ function abortTx() {
   state.tx = null;
 }
 
-function busy() {
-  state.busyUntil = Date.now() + 1500;
-  vibrate([60, 40, 60]);
-  toast(`Canale pieno: parlano già ${MAX_VOICES} persone`);
+function toggleMute() {
+  state.callMuted = !state.callMuted;
+  if (state.callMuted) stopTx();
+  else {
+    state.callRetryAt = 0;
+    state.ac?.resume();
+    openMic();
+    ensureCall();
+  }
+  vibrate(20);
   render();
-  setTimeout(render, 1600);
 }
 
-/* --------------------------------------------------------------------- VOX */
+/* --------------------------------------------------------------- Condivisi */
 
-const voxBuf = new Float32Array(1024);
-function voxTick() {
-  const an = state.analyser;
-  if (!state.vox || !an || !state.micSrc || state.mode === 'call') {
-    el.meterBar.style.width = '0';
+const seen = new Set();   // mid già mostrati (la cronologia arriva di nuovo a ogni riconnessione)
+
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
+  return (n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + ' MB';
+}
+
+function fmtTime(ts) {
+  return new Date(ts).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
+}
+
+// Testo con i link cliccabili. Solo nodi di testo e <a> costruiti a mano: niente HTML
+// da altri utenti nella pagina.
+function linkify(text) {
+  const frag = document.createDocumentFragment();
+  const re = /\bhttps?:\/\/[^\s<>"]+/gi;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    let url = m[0].replace(/[),.;:!?]+$/, '');
+    frag.append(text.slice(last, m.index));
+    const a = document.createElement('a');
+    a.href = url;
+    a.textContent = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    frag.append(a);
+    last = m.index + url.length;
+  }
+  frag.append(text.slice(last));
+  return frag;
+}
+
+function fileCard(f) {
+  const card = document.createElement('div');
+  card.className = 'file';
+  const expired = f.expires && Date.now() > f.expires;
+  if (expired) card.classList.add('expired');
+  const isApk = /\.apk$/i.test(f.name);
+  const isImg = /^image\/(png|jpeg|gif|webp)$/.test(f.type);
+
+  const icon = document.createElement('div');
+  icon.className = 'file-icon' + (isApk ? ' apk' : '');
+  if (isApk) icon.textContent = 'APK';
+  else icon.innerHTML = '<svg><use href="#i-file"/></svg>';
+
+  const meta = document.createElement('div');
+  meta.className = 'file-meta';
+  const name = document.createElement('div');
+  name.className = 'file-name';
+  name.textContent = f.name;
+  const sub = document.createElement('div');
+  sub.className = 'file-sub';
+  sub.textContent = fmtSize(f.size) + (expired ? ' · scaduto' : isApk ? ' · app Android' : '');
+  meta.append(name, sub);
+
+  const get = document.createElement('a');
+  get.className = 'file-get';
+  get.href = f.url;
+  get.textContent = isApk ? 'Installa' : isImg ? 'Apri' : 'Scarica';
+  if (isImg) {
+    get.target = '_blank';
+    get.rel = 'noopener';
+  } else {
+    get.setAttribute('download', f.name);
+  }
+  if (isApk) get.addEventListener('click', () => toast('Apri il file scaricato per installarla (Android chiede di consentire le app da fonti sconosciute)'));
+  card.append(icon, meta, get);
+
+  if (isImg && !expired) {
+    const wrap = document.createElement('div');
+    const img = document.createElement('img');
+    img.className = 'thumb';
+    img.src = f.url;
+    img.loading = 'lazy';
+    img.alt = f.name;
+    const link = document.createElement('a');
+    link.href = f.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.append(img);
+    wrap.append(link);
+    return [wrap, card];
+  }
+  return [card];
+}
+
+function addItem(m, scroll = true) {
+  if (seen.has(m.mid)) return;
+  seen.add(m.mid);
+  const li = document.createElement('li');
+  li.className = 'msg' + (m.from === state.myId ? ' mine' : '');
+  const head = document.createElement('div');
+  head.className = 'msg-head';
+  const who = document.createElement('b');
+  who.textContent = m.from === state.myId ? 'Tu' : m.name;
+  head.append(who, ' · ' + fmtTime(m.ts));
+  li.append(head);
+  if (m.text) {
+    const b = document.createElement('div');
+    b.className = 'bubble';
+    b.append(linkify(m.text));
+    li.append(b);
+  }
+  if (m.file) li.append(...fileCard(m.file));
+  el.feed.append(li);
+  el.feedEmpty.hidden = true;
+  if (scroll) li.scrollIntoView({ block: 'end', behavior: 'smooth' });
+}
+
+function onMessage(m) {
+  const fresh = !seen.has(m.mid);
+  addItem(m);
+  if (fresh && m.from !== state.myId) {
+    vibrate(30);
+    if (m.file) toast(`${m.name} ha condiviso ${m.file.name}`);
+  }
+}
+
+function sendText() {
+  const text = el.text.value.trim();
+  if (!text) return;
+  if (!state.connected) {
+    toast('Non collegato: riprova tra un attimo');
     return;
   }
-  an.getFloatTimeDomainData(voxBuf);
-  let sum = 0;
-  for (let i = 0; i < voxBuf.length; i++) sum += voxBuf[i] * voxBuf[i];
-  const db = 20 * Math.log10(Math.sqrt(sum / voxBuf.length) + 1e-9);
-  el.meterBar.style.width = Math.min(100, Math.max(0, (db + 70) / 60 * 100)) + '%';
-
-  // In vivavoce il mic sente gli altri: il VOX li scambierebbe per la tua voce.
-  const now = performance.now();
-  const blocked = !el.headphones.checked
-    && (state.talkers.size > 0 || Date.now() - state.rxEndedAt < VOX_RX_GUARD_MS);
-  if (db > state.voxThr && !blocked) {
-    state.voxLastLoud = now;
-    if (!state.tx) startTx('vox');
-  } else if (state.tx?.source === 'vox' && now - state.voxLastLoud > VOX_HANG_MS) {
-    stopTx();
-  }
+  send({ t: 'msg', text });
+  el.text.value = '';
 }
-setInterval(voxTick, 40);
+
+// Caricamento con XHR (per la barra di avanzamento). Il file arriva a tutti come
+// messaggio del server: la riga "in caricamento" è solo locale e poi sparisce.
+function uploadFile(file) {
+  if (file.size > state.maxUpload) {
+    toast(`${file.name}: troppo grande (max ${fmtSize(state.maxUpload)})`);
+    return;
+  }
+  if (!state.token) {
+    toast('Non collegato: riprova tra un attimo');
+    return;
+  }
+  const li = document.createElement('li');
+  li.className = 'msg mine';
+  const card = document.createElement('div');
+  card.className = 'file';
+  card.innerHTML = '<div class="file-icon"><svg><use href="#i-file"/></svg></div><div class="file-meta"><div class="file-name"></div><div class="file-sub"></div><div class="progress"><div></div></div></div>';
+  card.querySelector('.file-name').textContent = file.name;
+  const sub = card.querySelector('.file-sub');
+  const bar = card.querySelector('.progress > div');
+  sub.textContent = 'Caricamento… ' + fmtSize(file.size);
+  li.append(card);
+  el.feed.append(li);
+  el.feedEmpty.hidden = true;
+  li.scrollIntoView({ block: 'end' });
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/upload');
+  xhr.setRequestHeader('X-Token', state.token);
+  xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) bar.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      li.remove();
+      return;
+    }
+    let msg = 'errore ' + xhr.status;
+    try { msg = JSON.parse(xhr.responseText).error || msg; } catch { /* risposta non JSON */ }
+    sub.textContent = 'Non inviato: ' + msg;
+    bar.parentElement.remove();
+  };
+  xhr.onerror = () => {
+    sub.textContent = 'Non inviato: connessione persa';
+    bar.parentElement.remove();
+  };
+  xhr.send(file);
+}
+
+el.composer.addEventListener('submit', (e) => {
+  e.preventDefault();
+  sendText();
+});
+el.fileInput.addEventListener('change', () => {
+  [...el.fileInput.files].forEach(uploadFile);
+  el.fileInput.value = '';
+});
 
 /* --------------------------------------------------------------- WebSocket */
 
@@ -779,11 +935,19 @@ function connect() {
       case 'joined':
         state.connected = true;
         state.myId = m.id;
+        state.token = m.token;
+        state.maxUpload = m.maxUpload || state.maxUpload;
         state.channel = m.channel;
         state.users = m.users;
         clearTalkers();
         // I pacchetti opus sono indipendenti: chi sta già parlando si sente subito.
         m.talking.forEach((u) => startVoice(u.id, u.name));
+        // L'id cambia a ogni connessione: la cronologia si ridisegna da capo.
+        seen.clear();
+        el.feed.replaceChildren();
+        el.feedEmpty.hidden = !!(m.history || []).length;
+        (m.history || []).forEach((h) => addItem(h, false));
+        el.feed.lastElementChild?.scrollIntoView({ block: 'end' });
         el.chName.textContent = m.channel;
         history.replaceState(null, '', '?c=' + encodeURIComponent(m.channel));
         setupMediaSession();
@@ -806,7 +970,6 @@ function connect() {
           }
         } else {
           endVoice(m.id);
-          state.rxEndedAt = Date.now();
           updateMediaSession();
         }
         break;
@@ -816,9 +979,8 @@ function connect() {
       case 'floor_denied':
         onFloorDenied();
         break;
-      case 'tx_limit':
-        toast('Trasmissione troppo lunga, chiusa automaticamente');
-        stopTx();
+      case 'msg':
+        onMessage(m);
         break;
       case 'pong':
         state.rtt = performance.now() - m.ts;
@@ -841,6 +1003,7 @@ function connect() {
     if (state.ws !== ws) return;
     logEvent('server scollegato: riconnetto');
     state.connected = false;
+    state.token = null;
     clearTalkers();
     abortTx();
     render();
@@ -876,80 +1039,107 @@ setInterval(() => {
 
 /* --------------------------------------------------------------------- UI */
 
-function render() {
-  el.conn.textContent = state.connected ? 'Online' : 'Offline';
-  el.conn.className = 'pill ' + (state.connected ? 'ok' : 'bad');
-  el.mic.textContent = state.stream ? '🎙 Mic attivo' : 'Mic chiuso';
-  el.mic.className = 'pill ' + (state.stream ? 'ok' : '');
+function hue(s) {
+  let h = 0;
+  for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return h;
+}
 
-  const call = state.mode === 'call';
-  el.modeRadio.classList.toggle('on', !call);
-  el.modeCall.classList.toggle('on', call);
-  el.callHint.hidden = !call;
+function initials(name) {
+  const parts = name.trim().split(/\s+/);
+  return ((parts[0]?.[0] || '?') + (parts[1]?.[0] || '')).toUpperCase();
+}
+
+// Partecipanti: ridisegnati solo quando cambia qualcosa; il bagliore di chi parla
+// si aggiorna 10 volte al secondo con una variabile CSS.
+let peopleKey = '';
+function renderPeople() {
+  const onAir = !!(state.tx && state.tx.granted && !state.tx.stopped);
+  const me = state.users.find((u) => u.id === state.myId);
+  const others = state.users.filter((u) => u.id !== state.myId);
+  const list = me ? [me, ...others] : others;
+  const key = JSON.stringify([list, onAir, state.callMuted, [...state.talkers.keys()]]);
+  if (key === peopleKey) return;
+  peopleKey = key;
+  el.people.replaceChildren(...list.map((u) => {
+    const mine = u.id === state.myId;
+    const live = mine ? onAir : state.talkers.has(u.id);
+    const li = document.createElement('li');
+    li.className = 'person' + (mine ? ' me' : '') + (live ? '' : ' off');
+    li.dataset.id = u.id;
+    const av = document.createElement('div');
+    av.className = 'avatar';
+    av.style.setProperty('--hue', hue(u.name));
+    av.textContent = initials(u.name);
+    if (!live) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.innerHTML = '<svg><use href="#i-mic-off"/></svg>';
+      av.append(badge);
+    }
+    const name = document.createElement('div');
+    name.className = 'person-name';
+    name.textContent = mine ? 'Tu' : u.name;
+    li.append(av, name);
+    return li;
+  }));
+}
+
+const meterBuf = new Float32Array(1024);
+function myLevel() {
+  if (!state.analyser || !state.micSrc || !state.tx?.granted) return 0;
+  state.analyser.getFloatTimeDomainData(meterBuf);
+  let sum = 0;
+  for (let i = 0; i < meterBuf.length; i++) sum += meterBuf[i] * meterBuf[i];
+  return Math.sqrt(sum / meterBuf.length);
+}
+
+// RMS -> 0..1 su scala in dB: -50 dBFS spento, -15 dBFS pieno.
+const glow = (rms) => Math.max(0, Math.min(1, (20 * Math.log10(rms + 1e-9) + 50) / 35));
+
+setInterval(() => {
+  if (!state.joined || document.hidden) return;
+  el.people.querySelectorAll('.person').forEach((li) => {
+    const id = li.dataset.id;
+    const rms = id === state.myId ? (state.gateInfo?.open === false ? 0 : myLevel()) : (state.levels[id] || 0);
+    li.firstChild.style.setProperty('--lvl', glow(rms).toFixed(2));
+  });
+}, 100);
+
+function render() {
+  el.conn.classList.toggle('ok', state.connected);
   renderBrowserWarn();
-  el.voxRow.hidden = call;
-  el.voxPanel.hidden = call || !state.vox;
 
   const tx = state.tx;
   const names = talkerNames();
   const onAir = tx && tx.granted && !tx.stopped;
-  let status = 'In ascolto';
+  let status;
   let cls = '';
-  let label = 'Tieni premuto<br>per parlare';
   if (!state.connected) {
     status = 'Connessione…';
-  } else if (call) {
-    label = state.callMuted ? 'Tocca per<br>riattivare' : 'Tocca per<br>silenziare';
-    if (state.callMuted) {
-      status = '🔇 Microfono silenziato' + (names.length ? ' · parlano ' + names.join(', ') : '');
-      cls = 'busy';
-    } else if (onAir) {
-      status = '📞 In chiamata' + (names.length ? ' con ' + names.join(', ') : ' · nessun altro collegato');
-      cls = 'tx';
-    } else if (Date.now() < state.busyUntil) {
-      status = 'Canale pieno: riprovo…';
-      cls = 'busy';
-    } else {
-      status = state.stream ? 'Collegamento…' : 'Microfono chiuso';
-    }
-  } else if (onAir) {
-    status = 'IN ONDA' + (names.length ? ' · con ' + names.join(', ') : '');
-    cls = 'tx';
-    label = tx.source === 'vox' ? 'VOX attivo' : 'Rilascia per<br>chiudere';
-  } else if (tx && !tx.granted && !tx.denied) {
-    status = 'Apertura…';
-    cls = 'busy';
-  } else if (names.length) {
-    status = '🔊 ' + names.join(', ') + (names.length > 1 ? ' parlano' : ' sta parlando');
-    cls = 'rx';
+    cls = 'wait';
+  } else if (state.callMuted) {
+    status = 'Microfono silenziato';
+    cls = 'muted';
   } else if (Date.now() < state.busyUntil) {
-    status = 'Canale pieno';
-    cls = 'busy';
+    status = `Chiamata piena (max ${MAX_VOICES} voci): riprovo…`;
+    cls = 'muted';
+  } else if (!state.stream) {
+    status = state.micOpening ? 'Apertura microfono…' : 'Microfono chiuso';
+    cls = 'wait';
+  } else if (onAir) {
+    status = names.length ? 'In chiamata' : 'In chiamata · aspetti gli altri';
+  } else {
+    status = 'Collegamento…';
+    cls = 'wait';
   }
   el.status.textContent = status;
   el.status.className = 'status ' + cls;
-  el.ptt.className = 'ptt ' + (cls === 'tx' ? 'live' : cls === 'busy' ? 'pending' : cls);
-  el.pttLabel.innerHTML = label;
-  el.ptt.disabled = !state.connected;
-  applyVolume();
-
-  el.userCount.textContent = state.users.length ? '(' + state.users.length + ')' : '';
-  el.users.replaceChildren(...state.users.map((u) => {
-    const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.textContent = u.name;
-    li.append(name);
-    if (u.id === state.myId) {
-      const me = document.createElement('span');
-      me.className = 'me';
-      me.textContent = 'tu';
-      li.append(me);
-      if (onAir) li.className = 'me-talking';
-    } else if (state.talkers.has(u.id)) {
-      li.className = 'talking';
-    }
-    return li;
-  }));
+  el.mute.setAttribute('aria-pressed', String(state.callMuted));
+  el.mute.setAttribute('aria-label', state.callMuted ? 'Riattiva il microfono' : 'Silenzia il microfono');
+  el.mute.firstElementChild.firstElementChild.setAttribute('href', state.callMuted ? '#i-mic-off' : '#i-mic');
+  el.mute.disabled = !state.connected;
+  renderPeople();
 }
 
 // Registro degli ultimi eventi (mostrato nella diagnostica, sopravvive al background).
@@ -965,11 +1155,11 @@ function toast(msg) {
   el.toast.textContent = msg;
   el.toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.toast.hidden = true; }, 3000);
+  toastTimer = setTimeout(() => { el.toast.hidden = true; }, 3500);
 }
 
 function vibrate(p) {
-  if (navigator.vibrate) navigator.vibrate(p);
+  if (navigator.vibrate && navigator.userActivation?.hasBeenActive) navigator.vibrate(p);
 }
 
 function store(key, value) {
@@ -988,6 +1178,7 @@ function join() {
   store('channel', el.channel.value.trim());
 
   state.joined = true;
+  state.callMuted = false;
   // Siamo dentro un gesto dell'utente: sblocca l'AudioContext e il keep-alive.
   setupAudio();
   updateKeepAlive();
@@ -997,7 +1188,7 @@ function join() {
   pipFullscreen();
 
   el.join.hidden = true;
-  el.radio.hidden = false;
+  el.app.hidden = false;
   render();
 }
 
@@ -1009,11 +1200,12 @@ function leave() {
   state.ws = null;
   ws?.close();
   state.connected = false;
+  state.token = null;
   clearTalkers();
   state.users = [];
   updateKeepAlive();
   pipUpdate();
-  el.radio.hidden = true;
+  el.app.hidden = true;
   el.join.hidden = false;
 }
 
@@ -1022,57 +1214,10 @@ el.joinForm.addEventListener('submit', (e) => {
   join();
 });
 el.leave.addEventListener('click', leave);
-
-// PTT: tieni premuto (touch o mouse) oppure barra spaziatrice
-// In modalità chiamata lo stesso tasto silenzia / riattiva il microfono.
-let pttHeld = false;
-el.ptt.addEventListener('pointerdown', (e) => {
-  e.preventDefault();
-  state.ac?.resume();
-  if (state.mode === 'call') {
-    state.callMuted = !state.callMuted;
-    if (state.callMuted) stopTx();
-    else ensureCall();
-    vibrate(25);
-    render();
-    return;
-  }
-  el.ptt.setPointerCapture(e.pointerId);
-  pttHeld = true;
-  startTx('ptt');
-});
-const pttRelease = () => {
-  if (!pttHeld) return;
-  pttHeld = false;
-  if (state.tx?.source === 'ptt') stopTx();
-};
-['pointerup', 'pointercancel', 'lostpointercapture'].forEach((ev) => el.ptt.addEventListener(ev, pttRelease));
-el.ptt.addEventListener('contextmenu', (e) => e.preventDefault());
-
-document.addEventListener('keydown', (e) => {
-  if (e.code !== 'Space' || e.repeat || !state.joined || state.mode === 'call'
-    || e.target.matches('input, textarea, button')) return;
-  e.preventDefault();
-  pttHeld = true;
-  startTx('ptt');
-});
-document.addEventListener('keyup', (e) => {
-  if (e.code === 'Space') pttRelease();
-});
-
-function setMode(mode) {
-  if (state.mode === mode) return;
-  state.mode = mode;
-  store('mode', mode);
-  state.callMuted = false;
-  state.callRetryAt = 0;
-  stopTx();  // finish -> ensureCall riparte in modalità chiamata
-  ensureCall();
-  pipUpdate();
-  render();
-}
-el.modeRadio.addEventListener('click', () => setMode('radio'));
-el.modeCall.addEventListener('click', () => setMode('call'));
+el.mute.addEventListener('click', toggleMute);
+el.openSettings.addEventListener('click', () => el.settings.showModal());
+el.closeSettings.addEventListener('click', () => el.settings.close());
+el.settings.addEventListener('click', (e) => { if (e.target === el.settings) el.settings.close(); });
 
 // Livello del mio microfono. Silenzio *assoluto* (-inf dB) con il mic aperto vuol dire
 // che è Android a passare zeri a Chrome: succede quando l'app in background perde il
@@ -1114,9 +1259,9 @@ setInterval(() => {
   const track = state.stream?.getAudioTracks()[0];
   const ac = state.ac;
   const lines = [
-    `modo ${state.mode}${state.callMuted ? ' (muto)' : ''} · ws ${state.connected ? 'ok' : 'giù'} · visibile ${!document.hidden}`,
+    `${state.callMuted ? 'muto' : 'mic acceso'} · ws ${state.connected ? 'ok' : 'giù'} · visibile ${!document.hidden}`,
     `mic ${track ? track.readyState + (track.muted ? ' MUTED' : '') + ' eco ' + JSON.stringify(track.getSettings().echoCancellation) : 'chiuso'}`
-      + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ' ' + tx.source + ` ${tx.sent} pkt/s scartati ${tx.dropped}` : '-'}`,
+      + ` · tx ${tx ? (tx.granted ? 'ON' : tx.denied ? 'rifiutata' : 'attesa') + ` ${tx.sent} pkt/s scartati ${tx.dropped}` : '-'}`,
     `livello mic ${level === null ? '?' : level === -Infinity ? 'SILENZIO ASSOLUTO' : Math.round(level) + ' dB'}`
       + (state.gateInfo && el.gate.checked ? ` · gate ${state.gateInfo.open ? 'aperto' : 'chiuso'} fondo ${Math.round(20 * Math.log10(state.gateInfo.floor))} dB` : '')
       + ` · audio ${ac ? ac.state + ' ' + ac.sampleRate + ' Hz uscita ' + Math.round(((ac.outputLatency || 0) + (ac.baseLatency || 0)) * 1000) + ' ms' : '-'}`,
@@ -1140,37 +1285,17 @@ el.pipAuto.addEventListener('change', () => {
   pipUpdate();
   pipFullscreen();
 });
-
 el.diag.addEventListener('change', () => {
   el.diagOut.hidden = !el.diag.checked;
   store('diag', el.diag.checked ? '1' : '0');
 });
-
-el.vox.addEventListener('change', () => {
-  state.vox = el.vox.checked;
-  el.voxPanel.hidden = !state.vox;
-  state.ac?.resume();
-  if (!state.vox && state.tx?.source === 'vox') stopTx();
-});
-
-const showThr = () => {
-  state.voxThr = Number(el.voxThr.value);
-  el.voxThrVal.textContent = state.voxThr + ' dB';
-  el.meterThr.style.left = ((state.voxThr + 70) / 60 * 100) + '%';
-  store('voxThr', el.voxThr.value);
-};
-el.voxThr.addEventListener('input', showThr);
-el.volume.addEventListener('input', applyVolume);
-el.duck.addEventListener('change', () => {
-  store('duck', el.duck.checked ? '1' : '0');
+el.volume.addEventListener('input', () => {
+  store('volume', el.volume.value);
   applyVolume();
 });
 el.gate.addEventListener('change', () => {
   store('gate', el.gate.checked ? '1' : '0');
   state.capture?.port.postMessage({ gate: el.gate.checked });
-});
-el.headphones.addEventListener('change', () => {
-  store('headphones', el.headphones.checked ? '1' : '0');
 });
 el.keepAlive.addEventListener('change', () => {
   store('keepAlive', el.keepAlive.checked ? '1' : '0');
@@ -1183,18 +1308,14 @@ el.keepAlive.addEventListener('change', () => {
   const params = new URLSearchParams(location.search);
   el.name.value = load('name') || '';
   el.channel.value = params.get('c') || load('channel') || '';
-  el.voxThr.value = load('voxThr') || el.voxThr.value;
-  state.mode = load('mode') === 'call' ? 'call' : 'radio';
   el.diag.checked = load('diag') === '1';
   el.bgMic.checked = load('bgMic') === '1';
   el.pipAuto.checked = load('pipAuto') === '1';
   el.diagOut.hidden = !el.diag.checked;
-  el.duck.checked = load('duck') === '1';
-  el.headphones.checked = load('headphones') === '1';
   el.gate.checked = load('gate') !== '0';
   el.keepAlive.checked = load('keepAlive') !== '0';
+  el.volume.value = load('volume') || el.volume.value;
   store('aec', '0');  // opzione tolta: chi l'aveva accesa torna senza
-  showThr();
 
   const problems = [];
   if (!window.isSecureContext) problems.push('serve HTTPS (o localhost) per usare il microfono');

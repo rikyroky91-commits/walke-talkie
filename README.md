@@ -1,8 +1,9 @@
-# 📻 Walkie-Talkie WebSocket (zero WebRTC)
+# 🕸 Aracne
 
-Radio push-to-talk tra colleghi, nel browser. Niente `RTCPeerConnection`: Android non la
-vede come una chiamata, l'audio esce sul canale **Musica** e il telefono resta libero
-(puoi aprire altre app mentre continui a sentire il canale).
+Chiamata di gruppo, messaggi, link e file (anche APK) tra colleghi, nel browser. Niente
+WebRTC e niente filtri VoIP: Android non la vede come una chiamata, la voce esce sul
+canale **Musica** e il telefono resta libero (puoi usare altre app mentre sei in
+chiamata).
 
 ## Come funziona
 
@@ -19,66 +20,50 @@ L'istante è il timestamp audio del pacchetto in unità da 10 ms: il ricevitore 
 per misurare il jitter e funziona con qualsiasi durata di frame (10 ms, o 20 ms sui
 browser che non li supportano).
 
-Come una telefonata: pacchetti opus da 10 ms (WebCodecs), ognuno indipendente, e un
-jitter buffer adattivo nel thread audio. Niente MediaRecorder/MSE, che su Chrome
-richiedevano almeno 200 ms di buffer e si inceppavano sulla rete mobile.
-
-- **Più voci insieme**: fino a 4 persone possono parlare in contemporanea. Il server
-  mette in testa a ogni pacchetto l'id di chi parla; la pagina ha un decoder per voce e
-  il worklet di riproduzione le mixa. La quinta persona riceve "Canale pieno".
+- **Chiamata**: microfono sempre aperto finché la pagina è visibile (o nella mini
+  finestra), il tasto rotondo silenzia. Fino a 4 voci insieme; chi entra a metà sente
+  subito (i pacchetti sono indipendenti). I partecipanti si illuminano quando parlano
+  (livello misurato nel worklet di riproduzione, 10 volte al secondo).
+- **Condivisi**: messaggi e link viaggiano sul WebSocket (`{t:"msg"}`), gli ultimi 100
+  per canale vengono mandati a chi entra. I file (fino a 100 MB, APK comprese) si caricano
+  con `POST /upload` (corpo grezzo, header `X-Token` ricevuto all'ingresso e `X-Filename`),
+  fuori dal WebSocket così un file grande non rallenta la voce, e si scaricano da
+  `/f/<id>/<nome>`. Le APK escono come `application/vnd.android.package-archive`, così
+  Android propone l'installazione; le immagini hanno l'anteprima; tutto il resto è un
+  allegato con `nosniff` e CSP `sandbox`. I file restano 24 ore (1 GB in tutto) e si
+  perdono se il server riparte (su Render gratuito succede quando si spegne).
 - **Jitter buffer**: l'obiettivo è il 97° percentile del ritardo d'arrivo dei pacchetti
   negli ultimi 10 s, più 10 ms (min 30, max 600 ms). Ogni interruzione aggiunge 20 ms di
-  margine che svanisce in meno di un secondo di audio. Così il buffer sale appena la rete
-  peggiora e torna giù entro ~10 s quando si calma. Il ritardo accumulato si
-  recupera scartando i blocchi di silenzio tra le parole, non la voce. Il server, se un
-  ascoltatore ha più di ~1 s in coda, gli salta qualche pacchetto invece di accumulare.
-- **Due modalità**: 📻 *Radio* (tieni premuto per parlare, o VOX) e 📞 *Chiamata*
-  (microfono sempre aperto finché la pagina è in primo piano, il tasto silenzia).
-  Chi entra a metà sente subito (i pacchetti sono indipendenti). Le chiamate non hanno
-  il limite dei 120 s.
-- **Microfono anche fuori dal browser** (opzione della modalità Chiamata, spenta di
-  default): passando a un'altra app il microfono resta aperto e la trasmissione continua.
-  Chrome Android mantiene la cattura in background con la notifica "microfono in uso".
-  Nella pratica Android passa a Chrome solo silenzio ~8 s dopo che la pagina va in
-  background (la diagnostica lo segnala come "silenzio assoluto").
-- **Mini finestra automatica** (opzione della modalità Chiamata): la pagina va a schermo
-  intero con sotto un video invisibile (webm registrato da un canvas) che la copre. Chrome
-  Android, se premi Home mentre un video è a schermo intero, si riduce da solo in
-  Picture-in-Picture: resta visibile e quindi conserva il microfono. Ogni tocco sulla
-  pagina richiede di nuovo lo schermo intero (serve un gesto). Il PiP all'uscita è una
-  funzione di Chrome: sugli altri browser Android (Xiaomi, Samsung Internet, Firefox,
-  Opera…) la pagina all'apertura salta da sola a Chrome (link `intent://` con
-  `package=com.android.chrome`; senza Chrome il sistema apre il Play Store tramite
-  `browser_fallback_url`). Se il browser blocca il salto resta la schermata "Apri in
-  Chrome", con "Continua con questo browser" per restare. La pagina aperta così porta
-  `wt_chrome=1` e non reindirizza più, così non si creano giri infiniti. Se Chrome si
-  apre senza la pagina ci sono altre due vie: `googlechrome://navigate?url=` e il link
-  copiato negli appunti (ogni tocco sui pulsanti lo copia).
-- **Diagnostica** (Impostazioni → Mostra diagnostica): stato di mic, trasmissione, kbit/s
-  ricevuti per voce e stato di ogni lettore `<audio>`, utile per i problemi sui telefoni.
-- **Niente cancellazione d'eco**: con `echoCancellation: true` Chrome Android apre il
-  microfono come VOICE_COMMUNICATION e mette il telefono in modalità chiamata (anche
-  l'uscita audio diventa "chiamata"). Per questo è sempre spenta.
-- **Rumore nelle pause** (Impostazioni → "Silenzia il rumore nelle pause", acceso di
-  default): tutto software nella pagina. Un passa-alto a 80 Hz toglie il rombo e un gate
-  nel worklet di cattura stima il rumore di fondo e, nelle pause, abbassa il microfono di
-  26 dB (apre in 5 ms, chiude dopo 250 ms con una coda di 120 ms). Prova in locale:
-  fruscio nelle pause da -51 a -74 dBFS, voce invariata.
+  margine che svanisce in meno di un secondo di audio. Il ritardo accumulato si recupera
+  scartando i blocchi di silenzio tra le parole. Il server, se un ascoltatore ha più di
+  ~1 s in coda, gli salta qualche pacchetto invece di accumulare.
+- **Niente filtri del telefono**: con `echoCancellation`/`noiseSuppression`/
+  `autoGainControl` accesi Chrome Android apre il microfono come VOICE_COMMUNICATION e
+  mette il telefono in modalità chiamata. Sono sempre spenti.
+- **Rumore nelle pause** (Impostazioni, acceso di default): tutto software. Un passa-alto
+  a 80 Hz toglie il rombo e un gate nel worklet di cattura stima il rumore di fondo e,
+  nelle pause, abbassa il microfono di 26 dB (apre in 5 ms, chiude dopo 250 ms).
 - **Eco in vivavoce**: senza cancellazione d'eco il microfono sente l'altoparlante, quindi
-  in vivavoce chi parla insieme a te può sentire un'eco della propria voce. Rimedi, nelle
-  Impostazioni: le cuffie oppure "Abbassa gli altri mentre parlo"
-  (solo Radio: mentre tieni premuto gli altri scendono al 20%). Senza "Uso le cuffie" il VOX non scatta
-  mentre parlano gli altri; il PTT funziona sempre in contemporanea.
-- **Microfono solo con pagina visibile**: su `visibilitychange` → `hidden` tutte le
-  tracce vengono fermate (`track.stop()`), l'indicatore microfono di Android si spegne.
-  L'AudioContext continua a suonare in background.
+  in vivavoce gli altri sentono l'eco della propria voce. Rimedio: le cuffie.
+- **Mini finestra automatica** (Impostazioni): la pagina va a schermo intero con sotto un
+  video invisibile (webm registrato da un canvas) che la copre. Chrome Android, se premi
+  Home mentre un video è a schermo intero, si riduce da solo in Picture-in-Picture: resta
+  visibile e quindi conserva il microfono. Ogni tocco sulla pagina (non sulla barra per
+  scrivere) richiede di nuovo lo schermo intero.
+- **Solo Chrome su Android**: il PiP all'uscita è una funzione di Chrome. Dagli altri
+  browser Android la pagina salta da sola a Chrome (link `intent://` con
+  `package=com.android.chrome`; senza Chrome il Play Store tramite
+  `browser_fallback_url`). Se il salto è bloccato resta la schermata "Apri in Chrome",
+  con `googlechrome://navigate?url=` e il link copiato negli appunti come altre vie.
+  `wt_chrome=1` evita giri infiniti.
+- **Microfono anche fuori dal browser** (Impostazioni, spento): tiene aperta la cattura in
+  background. Nella pratica Android passa a Chrome solo silenzio ~8 s dopo (la
+  diagnostica lo segnala come "silenzio assoluto"): meglio la mini finestra.
 - **Keep-alive** (disattivabile): un WAV di rumore a −60 dBFS in loop tiene la pagina
-  "in riproduzione", così Chrome non la congela tra una trasmissione e l'altra. Appare la
-  notifica multimediale "Canale X" (con "X sta parlando" durante la ricezione).
-- **VOX**: misura il livello del mic (AnalyserNode, l'AudioContext non è collegato
-  all'uscita), soglia regolabile, 0.9 s di coda.
-- Il server chiude la trasmissione se chi parla cade, smette di inviare audio per 4 s
-  (30 s in chiamata) o supera i 120 s (solo Radio).
+  "in riproduzione", così Chrome non la congela. Appare la notifica multimediale.
+- **Diagnostica** (Impostazioni): mic, trasmissione, gate, jitter e buffer per voce,
+  ritardo scomposto e registro degli eventi.
+- Il server chiude la trasmissione se chi parla cade o smette di inviare audio per 30 s.
 
 ## Avvio
 
@@ -111,7 +96,7 @@ Link diretto a un canale: `https://server/?c=magazzino`.
 2. Su [render.com](https://render.com): **New → Blueprint** e scegli il repository.
    Render legge `render.yaml`, chiede il valore di `ACCESS_CODE` (il codice per i
    colleghi) e crea il servizio a Francoforte con HTTPS incluso.
-3. L'app sarà su `https://walkie-talkie-xxxx.onrender.com`. Ogni `git push` la aggiorna.
+3. L'app sarà su `https://<nome-servizio>.onrender.com`. Ogni `git push` la aggiorna.
 
 Piano gratuito: dopo 15 minuti senza traffico il servizio si spegne e la prima apertura
 successiva impiega ~1 minuto. Le pagine aperte si riconnettono da sole. Per averlo sempre
@@ -153,7 +138,7 @@ Browser: Chrome o Edge aggiornati (Android e desktop): servono WebCodecs `AudioE
 
 ## File
 
-- `server.py`: server aiohttp (static + `/ws`, canali, floor control, watchdog)
+- `server.py`: server aiohttp (static + `/ws`, canali, voci, messaggi, `/upload`, `/f/…`)
 - `public/index.html`, `public/style.css`: interfaccia
-- `public/app.js`: cattura, codifica/decodifica opus, PTT/VOX, ciclo di vita del microfono
-- `public/audio-worklet.js`: cattura a blocchi da 20 ms, jitter buffer e mix delle voci
+- `public/app.js`: chiamata (opus, jitter), condivisi, mini finestra, ciclo di vita del mic
+- `public/audio-worklet.js`: cattura a blocchi da 10 ms con gate, jitter buffer, mix e livelli

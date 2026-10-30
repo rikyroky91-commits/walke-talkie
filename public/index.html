@@ -2,29 +2,51 @@
 <html lang="it">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111418">
-  <title>Walkie-Talkie</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0e0f14">
+  <title>Aracne</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230e0f14'/%3E%3Cg fill='none' stroke='%23a78bfa' stroke-width='3' stroke-linejoin='round'%3E%3Cpath d='M32 8v48M8 32h48M15 15l34 34M49 15 15 49'/%3E%3Cpath d='M32 14 44.7 19.3 50 32 44.7 44.7 32 50 19.3 44.7 14 32 19.3 19.3Z'/%3E%3Cpath d='M32 23 38.4 25.6 41 32 38.4 38.4 32 41 25.6 38.4 23 32 25.6 25.6Z'/%3E%3C/g%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Icone usate in tutta la pagina -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-web" viewBox="0 0 64 64"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"><path d="M32 4v56M4 32h56M12.2 12.2l39.6 39.6M51.8 12.2 12.2 51.8"/><path d="M32 12 46.1 17.9 52 32 46.1 46.1 32 52 17.9 46.1 12 32 17.9 17.9Z"/><path d="M32 22 39.1 24.9 42 32 39.1 39.1 32 42 24.9 39.1 22 32 24.9 24.9Z"/></g></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"/></g></symbol>
+    <symbol id="i-mic-off" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4M3 3l18 18"/></g></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></g></symbol>
+    <symbol id="i-leave" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></g></symbol>
+    <symbol id="i-clip" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m21 11.5-8.6 8.6a5.2 5.2 0 0 1-7.4-7.4l8.6-8.6a3.5 3.5 0 0 1 4.9 4.9l-8.6 8.6a1.7 1.7 0 0 1-2.5-2.5l7.9-7.9"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4Z"/></g></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></g></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></symbol>
+  </svg>
+
   <!-- Browser Android diverso da Chrome: si passa a Chrome (o al Play Store se manca) -->
-  <section id="needChrome" class="screen" hidden>
-    <h1>📻 Walkie-Talkie</h1>
-    <p class="sub">Questa app funziona con Google Chrome: solo lì il microfono resta attivo quando esci dalla pagina.</p>
-    <a id="gotoChrome" class="primary" href="#">Apri in Chrome</a>
-    <p class="hint">Se Chrome non è installato si apre il Play Store per installarlo.</p>
-    <a id="gotoChrome2" class="ghost link-btn" href="#">Chrome si apre senza la pagina? Tocca qui</a>
-    <button type="button" id="copyLink" class="ghost">Copia il link</button>
-    <p class="hint">Toccando i pulsanti il link viene anche copiato: se Chrome si apre vuoto, tieni premuto sulla barra degli indirizzi e scegli "Incolla e vai".</p>
-    <button type="button" id="stayHere" class="ghost">Continua con questo browser</button>
+  <section id="needChrome" class="screen center" hidden>
+    <div class="brand">
+      <svg class="logo"><use href="#i-web"/></svg>
+      <h1>Aracne</h1>
+    </div>
+    <div class="card stack">
+      <p>Aracne funziona con Google Chrome: solo lì il microfono resta attivo quando esci dalla pagina.</p>
+      <a id="gotoChrome" class="btn primary" href="#">Apri in Chrome</a>
+      <p class="hint">Se Chrome non è installato si apre il Play Store per installarlo.</p>
+      <a id="gotoChrome2" class="btn ghost" href="#">Chrome si apre senza la pagina? Tocca qui</a>
+      <button type="button" id="copyLink" class="btn ghost">Copia il link</button>
+      <p class="hint">Toccando i pulsanti il link viene anche copiato: se Chrome si apre vuoto, tieni premuto sulla barra degli indirizzi e scegli "Incolla e vai".</p>
+      <button type="button" id="stayHere" class="btn link">Continua con questo browser</button>
+    </div>
   </section>
 
-  <!-- Schermata di accesso -->
-  <section id="join" class="screen">
-    <h1>📻 Walkie-Talkie</h1>
-    <p class="sub">Radio tra colleghi via WebSocket — niente chiamate, il telefono resta libero.</p>
-    <form id="joinForm" autocomplete="on">
+  <!-- Accesso -->
+  <section id="join" class="screen center">
+    <div class="brand">
+      <svg class="logo"><use href="#i-web"/></svg>
+      <h1>Aracne</h1>
+      <p class="tagline">Voce, file e link tra colleghi. Una sola tela.</p>
+    </div>
+    <form id="joinForm" class="card stack" autocomplete="on">
       <label>Il tuo nome
         <input id="name" name="name" maxlength="32" required placeholder="Mario">
       </label>
@@ -34,106 +56,106 @@
       <label>Codice di accesso <small>(se richiesto)</small>
         <input id="code" name="code" type="password" maxlength="64" autocomplete="off">
       </label>
-      <button type="submit" class="primary">Entra nel canale</button>
+      <button type="submit" class="btn primary">Entra</button>
       <p id="joinError" class="error" hidden></p>
     </form>
     <p id="compat" class="warn" hidden></p>
   </section>
 
-  <!-- Schermata radio -->
-  <section id="radio" class="screen" hidden>
-    <header>
-      <div>
-        <div class="ch-label">Canale</div>
-        <div id="chName" class="ch-name">—</div>
+  <!-- App -->
+  <section id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="where">
+        <svg class="logo-sm"><use href="#i-web"/></svg>
+        <div>
+          <div class="ch-label">Canale <span id="conn" class="conn" title="Connessione"></span></div>
+          <div id="chName" class="ch-name">—</div>
+        </div>
       </div>
-      <div class="hdr-right">
-        <span id="conn" class="pill">…</span>
-        <button id="leave" class="ghost">Esci</button>
+      <div class="top-actions">
+        <button type="button" id="openSettings" class="icon-btn" aria-label="Impostazioni"><svg><use href="#i-settings"/></svg></button>
+        <button type="button" id="leave" class="icon-btn" aria-label="Esci"><svg><use href="#i-leave"/></svg></button>
       </div>
     </header>
 
-    <div class="mode" role="group" aria-label="Modalità">
-      <button type="button" id="modeRadio" class="seg">📻 Radio</button>
-      <button type="button" id="modeCall" class="seg">📞 Chiamata</button>
-    </div>
-    <div id="callHint" class="call-opts" hidden>
-      <p class="hint">Microfono sempre aperto. In vivavoce senza cuffie ognuno sente l'eco della propria voce: usate le cuffie.</p>
-      <label class="switch">
-        <input type="checkbox" id="bgMic">
-        <span>Microfono attivo anche fuori dal browser</span>
-      </label>
-      <p class="hint">I colleghi continuano a sentirti mentre usi altre app (Android mostra il pallino verde del microfono). Per smettere: "silenzia" oppure "Esci".</p>
-      <label class="switch">
-        <input type="checkbox" id="pipAuto">
-        <span>Mini finestra automatica quando esco</span>
-      </label>
-      <p class="hint">Android toglie il microfono a Chrome appena esci, ma non se Chrome resta visibile in una mini finestra. Con questa opzione la pagina va a schermo intero: premendo Home Chrome si riduce da solo a finestrella e i colleghi continuano a sentirti. Tocca la finestrella per tornare.</p>
+    <section class="call">
+      <ul id="people" class="people" aria-label="In chiamata"></ul>
+      <div class="call-bar">
+        <div>
+          <div id="status" class="status">Connessione…</div>
+          <div class="stats"><span id="rtt">RTT —</span> · <span id="lag">ritardo —</span></div>
+        </div>
+        <button type="button" id="mute" class="mute" aria-pressed="false" aria-label="Silenzia il microfono">
+          <svg><use href="#i-mic"/></svg>
+        </button>
+      </div>
       <div id="otherBrowser" class="browser-warn" hidden>
         <p>Questo browser non si riduce a finestrella quando esci, quindi in background il microfono si perde. Funziona con Google Chrome.</p>
-        <a id="openChrome" class="primary" href="#">Apri in Chrome</a>
-        <button type="button" id="pipNow" class="ghost" hidden>📺 Riduci a finestrella ora</button>
+        <a id="openChrome" class="btn primary" href="#">Apri in Chrome</a>
+        <button type="button" id="pipNow" class="btn ghost" hidden>Riduci a finestrella ora</button>
       </div>
-    </div>
+    </section>
 
-    <div id="status" class="status">Connessione…</div>
+    <section class="feed" aria-label="Condivisi">
+      <ol id="feed" class="feed-list"></ol>
+      <div id="feedEmpty" class="empty">
+        <svg class="logo-empty"><use href="#i-web"/></svg>
+        <p>Qui arrivano messaggi, link e file del canale.<br>Anche le APK: chi le riceve le installa con un tocco.</p>
+      </div>
+    </section>
 
-    <button id="ptt" class="ptt" aria-label="Tieni premuto per parlare">
-      <span class="ptt-icon">🎙</span>
-      <span id="pttLabel" class="ptt-label">Tieni premuto<br>per parlare</span>
-    </button>
-
-    <div class="row">
-      <label id="voxRow" class="switch">
-        <input type="checkbox" id="vox">
-        <span>VOX (attivazione vocale)</span>
+    <form id="composer" class="composer">
+      <label class="icon-btn attach" aria-label="Allega file">
+        <input type="file" id="fileInput" multiple>
+        <svg><use href="#i-clip"/></svg>
       </label>
-      <span id="mic" class="pill">Mic chiuso</span>
-    </div>
+      <input id="text" placeholder="Scrivi o incolla un link…" autocomplete="off" maxlength="2000" enterkeyhint="send">
+      <button type="submit" class="send" aria-label="Invia"><svg><use href="#i-send"/></svg></button>
+    </form>
+  </section>
 
-    <div id="voxPanel" class="vox-panel" hidden>
-      <div class="meter"><div id="meterBar"></div><div id="meterThr"></div></div>
-      <label>Soglia VOX <input id="voxThr" type="range" min="-70" max="-10" step="1" value="-42"> <span id="voxThrVal">-42 dB</span></label>
+  <!-- Impostazioni -->
+  <dialog id="settings" class="sheet">
+    <div class="sheet-head">
+      <h2>Impostazioni</h2>
+      <button type="button" id="closeSettings" class="icon-btn" aria-label="Chiudi"><svg><use href="#i-close"/></svg></button>
     </div>
-
-    <details class="settings">
-      <summary>Impostazioni</summary>
+    <div class="sheet-body">
       <label>Volume <input id="volume" type="range" min="0" max="1" step="0.05" value="1"></label>
-      <label class="switch">
-        <input type="checkbox" id="duck">
-        <span>Abbassa gli altri mentre parlo</span>
-      </label>
-      <p class="hint">Riduce l'eco in vivavoce: mentre tieni premuto, i colleghi si sentono al 20%.</p>
+
       <label class="switch">
         <input type="checkbox" id="gate" checked>
         <span>Silenzia il rumore nelle pause</span>
       </label>
-      <p class="hint">Quando non parli il tuo microfono si abbassa da solo e gli altri non sentono il fruscio di fondo. Lavora tutto nella pagina, senza i filtri del telefono (che farebbero vedere una chiamata ad Android).</p>
+      <p class="hint">Quando non parli il microfono si abbassa da solo e gli altri non sentono il fruscio di fondo. Lavora tutto nella pagina, senza i filtri del telefono.</p>
+
       <label class="switch">
-        <input type="checkbox" id="headphones">
-        <span>Uso le cuffie</span>
+        <input type="checkbox" id="pipAuto">
+        <span>Mini finestra automatica quando esco</span>
       </label>
-      <p class="hint">Senza cuffie il VOX non scatta mentre parlano gli altri, altrimenti scambierebbe la loro voce dall'altoparlante per la tua.</p>
+      <p class="hint">Android toglie il microfono a Chrome appena esci, ma non se Chrome resta visibile in una mini finestra. La pagina va a schermo intero: premendo Home si riduce da sola a finestrella e i colleghi continuano a sentirti.</p>
+
+      <label class="switch">
+        <input type="checkbox" id="bgMic">
+        <span>Microfono attivo anche fuori dal browser</span>
+      </label>
+      <p class="hint">Tiene aperto il microfono quando passi a un'altra app. Su molti telefoni Android lo silenzia dopo pochi secondi: meglio la mini finestra.</p>
+
       <label class="switch">
         <input type="checkbox" id="keepAlive" checked>
         <span>Mantieni attivo in background</span>
       </label>
-      <p class="hint">Quando passi a un'altra app il microfono si chiude da solo, ma continui a sentire i colleghi dall'altoparlante (canale Musica, non chiamata).</p>
+      <p class="hint">Continui a sentire i colleghi dall'altoparlante (canale Musica, non chiamata). In vivavoce senza cuffie gli altri sentono l'eco della propria voce: usate le cuffie.</p>
+
       <label class="switch">
         <input type="checkbox" id="diag">
         <span>Mostra diagnostica</span>
       </label>
-    </details>
+      <pre id="diagOut" class="diag" hidden></pre>
+    </div>
+  </dialog>
 
-    <pre id="diagOut" class="diag" hidden></pre>
-
-    <h2>Nel canale <span id="userCount"></span></h2>
-    <ul id="users" class="users"></ul>
-
-    <footer><span id="rtt">RTT —</span> · <span id="lag">ritardo —</span></footer>
-  </section>
-
-  <!-- Keep-alive (la ricezione suona dall'AudioContext) -->
+  <!-- Keep-alive (la voce suona dall'AudioContext) e video per la mini finestra -->
   <audio id="ka" playsinline loop></audio>
   <video id="pipVideo" class="pip-video" muted playsinline loop hidden></video>
 
