@@ -555,7 +555,19 @@ function pipFullscreen(e) {
 document.addEventListener('pointerdown', pipFullscreen, true);
 document.addEventListener('fullscreenchange', () => {
   logEvent(document.fullscreenElement ? 'schermo intero' : 'fine schermo intero');
+  fitHeight();
+  setTimeout(fitHeight, 300);  // alcuni telefoni ridimensionano dopo l'evento
 });
+
+// Altezza visibile reale (schermo intero, tastiera aperta, rotazione): 100dvh non
+// sempre si aggiorna a schermo intero e la barra in basso finiva fuori dallo schermo.
+function fitHeight() {
+  const h = window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty('--app-h', Math.round(h) + 'px');
+}
+window.addEventListener('resize', fitHeight);
+window.visualViewport?.addEventListener('resize', fitHeight);
+fitHeight();
 // La finestrella PiP rimpicciolisce la pagina: lo registriamo per la diagnostica.
 let pipSmall = false;
 window.addEventListener('resize', () => {

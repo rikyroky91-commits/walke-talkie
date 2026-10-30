@@ -88,10 +88,16 @@ button { font: inherit; cursor: pointer; color: inherit; }
 
 /* ------------------------------------------------------------------ App */
 
+/* Altezza misurata dalla pagina (--app-h): a schermo intero alcuni Android (Redmi)
+   non aggiornano 100dvh e la barra in basso finiva fuori dallo schermo. */
 .app {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
   max-width: 720px;
   margin: 0 auto;
-  height: 100dvh;
+  height: var(--app-h, 100dvh);
   display: flex;
   flex-direction: column;
   padding-top: env(safe-area-inset-top);
@@ -294,6 +300,9 @@ button { font: inherit; cursor: pointer; color: inherit; }
   border-top: 1px solid var(--line);
   background: var(--bg);
 }
+/* A schermo intero la barra dei gesti di Android sta sopra la pagina: un po' di margine. */
+:root:fullscreen .composer { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+:root:fullscreen .app { padding-top: max(8px, env(safe-area-inset-top)); }
 .composer input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .composer #text { flex: 1; border-radius: 22px; padding: 11px 16px; }
 .send {
